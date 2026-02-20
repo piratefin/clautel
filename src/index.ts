@@ -17,6 +17,7 @@ async function main() {
 
   // Express server
   const app = express();
+  app.use(express.json());
   app.post(
     "/webhook",
     webhookCallback(bot, "express", { secretToken: webhookSecret })

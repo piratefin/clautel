@@ -6,6 +6,9 @@ import {
   cancelQuery,
   clearSession,
   getSessionCost,
+  setModel,
+  getModel,
+  AVAILABLE_MODELS,
 } from "./claude.js";
 import {
   claudeToTelegram,
@@ -24,6 +27,11 @@ let approvalCounter = 0;
 export function createBot(): Bot {
   const bot = new Bot(config.TELEGRAM_BOT_TOKEN);
 
+  // Global error handler — don't crash on unhandled bot errors
+  bot.catch((err) => {
+    console.error("Bot error:", err.message);
+  });
+
   // Owner-only guard
   bot.use(async (ctx, next) => {
     if (ctx.from?.id !== config.TELEGRAM_OWNER_ID) {
@@ -40,6 +48,7 @@ export function createBot(): Bot {
         "Send any message to interact with Claude Code.\n\n" +
         "<b>Commands:</b>\n" +
         "/new - Start a fresh session\n" +
+        "/model - Switch Claude model\n" +
         "/cost - Show session cost\n" +
         "/cancel - Abort current operation",
       { parse_mode: "HTML" }
@@ -60,6 +69,24 @@ export function createBot(): Bot {
   bot.command("cost", async (ctx) => {
     const cost = getSessionCost(ctx.chat.id);
     await ctx.reply(`Session cost so far: $${cost.toFixed(4)}`);
+  });
+
+  // /model command — select Claude model
+  bot.command("model", async (ctx) => {
+    const current = getModel(ctx.chat.id);
+    const currentLabel =
+      AVAILABLE_MODELS.find((m) => m.id === current)?.label || current;
+
+    const keyboard = new InlineKeyboard();
+    for (const m of AVAILABLE_MODELS) {
+      const check = m.id === current ? " (current)" : "";
+      keyboard.text(`${m.label}${check}`, `model:${m.id}`).row();
+    }
+
+    await ctx.reply(`Current model: <b>${currentLabel}</b>\n\nSelect a model:`, {
+      parse_mode: "HTML",
+      reply_markup: keyboard,
+    });
   });
 
   // /cancel command
@@ -237,20 +264,44 @@ export function createBot(): Bot {
       }
     };
 
-    await sendMessage(chatId, text, {
+    // Fire-and-forget: don't await, so the webhook responds to Telegram immediately.
+    // Otherwise grammY's webhook adapter times out after 10s.
+    sendMessage(chatId, text, {
       onStreamChunk,
       onToolApproval,
       onResult,
       onError,
+    }).catch((err) => {
+      onError(err instanceof Error ? err : new Error(String(err)));
     });
   });
 
-  // Callback query handler for Approve/Deny buttons
+  // Callback query handler for Approve/Deny buttons and model selection
   bot.on("callback_query:data", async (ctx) => {
     const data = ctx.callbackQuery.data;
+
+    // Model selection
+    const modelMatch = data.match(/^model:(.+)$/);
+    if (modelMatch) {
+      const modelId = modelMatch[1];
+      const chatId = ctx.chat!.id;
+      const label =
+        AVAILABLE_MODELS.find((m) => m.id === modelId)?.label || modelId;
+
+      setModel(chatId, modelId);
+
+      await ctx.editMessageText(
+        `Model switched to <b>${label}</b>\nSession reset — next message uses the new model.`,
+        { parse_mode: "HTML" }
+      ).catch(() => {});
+      await ctx.answerCallbackQuery(`Switched to ${label}`).catch(() => {});
+      return;
+    }
+
+    // Approve/Deny
     const match = data.match(/^(approve|deny):(\d+)$/);
     if (!match) {
-      await ctx.answerCallbackQuery("Invalid action");
+      await ctx.answerCallbackQuery("Invalid action").catch(() => {});
       return;
     }
 
@@ -258,7 +309,7 @@ export function createBot(): Bot {
     const pending = pendingApprovals.get(requestId);
 
     if (!pending) {
-      await ctx.answerCallbackQuery("Request expired");
+      await ctx.answerCallbackQuery("Request expired").catch(() => {});
       return;
     }
 
@@ -269,15 +320,15 @@ export function createBot(): Bot {
     pending.resolve(approved);
 
     // Update the approval message
-    const label = approved ? "APPROVED" : "DENIED";
+    const statusLabel = approved ? "APPROVED" : "DENIED";
     try {
       const originalText = ctx.callbackQuery.message?.text || "";
-      await ctx.editMessageText(`[${label}]\n${originalText}`);
+      await ctx.editMessageText(`[${statusLabel}]\n${originalText}`);
     } catch {
       // Ignore edit errors
     }
 
-    await ctx.answerCallbackQuery(approved ? "Approved" : "Denied");
+    await ctx.answerCallbackQuery(approved ? "Approved" : "Denied").catch(() => {});
   });
 
   return bot;

@@ -34,12 +34,22 @@ export interface SendCallbacks {
   onError: (error: Error) => void;
 }
 
+export const AVAILABLE_MODELS = [
+  { id: "claude-opus-4-6", label: "Opus 4.6" },
+  { id: "claude-sonnet-4-5-20250929", label: "Sonnet 4.5" },
+  { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
+] as const;
+
+const DEFAULT_MODEL = AVAILABLE_MODELS[0].id;
+
 // chatId → Claude sessionId
 const sessions = new Map<number, string>();
 // chatId → total cost accumulated
 const sessionCosts = new Map<number, number>();
 // chatId → AbortController for active query
 const activeAborts = new Map<number, AbortController>();
+// chatId → selected model
+const selectedModels = new Map<number, string>();
 
 export function isProcessing(chatId: number): boolean {
   return activeAborts.has(chatId);
@@ -52,6 +62,16 @@ export function getSessionCost(chatId: number): number {
 export function clearSession(chatId: number): void {
   sessions.delete(chatId);
   sessionCosts.delete(chatId);
+}
+
+export function setModel(chatId: number, modelId: string): void {
+  selectedModels.set(chatId, modelId);
+  // Changing model requires a fresh session
+  sessions.delete(chatId);
+}
+
+export function getModel(chatId: number): string {
+  return selectedModels.get(chatId) || DEFAULT_MODEL;
 }
 
 export function cancelQuery(chatId: number): boolean {
@@ -75,10 +95,13 @@ export async function sendMessage(
   const sessionId = sessions.get(chatId);
 
   try {
+    const model = selectedModels.get(chatId) || DEFAULT_MODEL;
+
     const q = query({
       prompt,
       options: {
         cwd: config.CLAUDE_WORKING_DIR,
+        model,
         includePartialMessages: true,
         permissionMode: "default",
         ...(sessionId ? { resume: sessionId } : {}),
