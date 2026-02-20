@@ -1,0 +1,23 @@
+{
+  "name": "claude-on-phone",
+  "version": "1.0.0",
+  "description": "Telegram bridge for Claude Code - use Claude from your phone",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-code": "^1",
+    "@ngrok/ngrok": "^1",
+    "dotenv": "^16",
+    "express": "^4",
+    "grammy": "^1"
+  },
+  "devDependencies": {
+    "@types/express": "^4",
+    "@types/node": "^22",
+    "tsx": "^4",
+    "typescript": "^5"
+  }
+}
