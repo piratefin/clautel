@@ -266,30 +266,21 @@ export function createBot(): Bot {
         const parts = splitMessage(html);
 
         try {
-          await bot.api.editMessageText(
-            chatId,
-            thinkingMsgId,
-            parts[0] || "Done.",
-            { parse_mode: "HTML" }
-          );
+          await bot.api.deleteMessage(chatId, thinkingMsgId);
         } catch {
-          try {
-            await bot.api.editMessageText(
-              chatId,
-              thinkingMsgId,
-              finalText.slice(0, 4096) || "Done."
-            );
-          } catch {}
+          await bot.api
+            .editMessageText(chatId, thinkingMsgId, "⏤")
+            .catch(() => {});
         }
 
-        for (let i = 1; i < parts.length; i++) {
+        for (const part of parts) {
           try {
-            await bot.api.sendMessage(chatId, parts[i], {
+            await bot.api.sendMessage(chatId, part || "Done.", {
               parse_mode: "HTML",
             });
           } catch {
             await bot.api
-              .sendMessage(chatId, finalText.slice(i * 4000, (i + 1) * 4000))
+              .sendMessage(chatId, part || "Done.")
               .catch(() => {});
           }
         }
