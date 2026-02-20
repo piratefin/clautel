@@ -2,22 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { Bot, InlineKeyboard } from "grammy";
 import { config } from "./config.js";
-import {
-  sendMessage,
-  isProcessing,
-  cancelQuery,
-  clearSession,
-  getSessionTokens,
-  setModel,
-  getModel,
-  getSessionId,
-  setWorkingDir,
-  getWorkingDir,
-  isCoolingDown,
-  setLastPrompt,
-  getLastPrompt,
-  AVAILABLE_MODELS,
-} from "./claude.js";
+import { ClaudeBridge, AVAILABLE_MODELS } from "./claude.js";
+import type { BotConfig } from "./store.js";
 import {
   claudeToTelegram,
   splitMessage,
@@ -25,60 +11,19 @@ import {
 } from "./formatter.js";
 import { logUser, logStream, logResult, logError } from "./log.js";
 
-const pendingApprovals = new Map<
-  string,
-  { resolve: (approved: boolean) => void; timer: NodeJS.Timeout }
->();
+export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
+  const bot = new Bot(botConfig.token);
+  const tag = botConfig.username;
 
-let approvalCounter = 0;
-let retryCounter = 0;
+  const pendingApprovals = new Map<
+    string,
+    { resolve: (approved: boolean) => void; timer: NodeJS.Timeout }
+  >();
+  let approvalCounter = 0;
+  let retryCounter = 0;
 
-const folderCache = new Map<string, string>();
-let folderIdCounter = 0;
-
-function getFolderId(dirPath: string): string {
-  for (const [id, p] of folderCache) {
-    if (p === dirPath) return id;
-  }
-  const id = String(++folderIdCounter);
-  folderCache.set(id, dirPath);
-  return id;
-}
-
-function buildFolderKeyboard(dir: string): InlineKeyboard {
-  const keyboard = new InlineKeyboard();
-
-  const parent = path.dirname(dir);
-  if (parent !== dir) {
-    const pid = getFolderId(parent);
-    keyboard.text(`.. (${path.basename(parent) || "/"})`, `fd:${pid}`).row();
-  }
-
-  try {
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
-    const dirs = entries
-      .filter((e) => e.isDirectory() && !e.name.startsWith("."))
-      .sort((a, b) => a.name.localeCompare(b.name))
-      .slice(0, 20);
-
-    for (const d of dirs) {
-      const full = path.join(dir, d.name);
-      const fid = getFolderId(full);
-      keyboard.text(`📁 ${d.name}`, `fd:${fid}`).row();
-    }
-  } catch {}
-
-  const selId = getFolderId(dir);
-  keyboard.text("✅ Select this folder", `sf:${selId}`).row();
-  return keyboard;
-}
-
-export function createBot(): Bot {
-  const bot = new Bot(config.TELEGRAM_BOT_TOKEN);
-
-  // Global error handler — don't crash on unhandled bot errors
   bot.catch((err) => {
-    console.error("Bot error:", err.message);
+    console.error(`[${tag}] Bot error:`, err.message);
   });
 
   // Owner-only guard
@@ -90,51 +35,48 @@ export function createBot(): Bot {
     await next();
   });
 
+  const repoName = path.basename(botConfig.workingDir);
+
   const helpText =
-    "<b>Claude on Phone</b>\n\n" +
+    `<b>${repoName}</b>\n` +
+    `<code>${botConfig.workingDir}</code>\n\n` +
     "Send any text or photo to interact with Claude Code.\n\n" +
     "<b>Commands:</b>\n" +
-    "/folder — Browse and select a working directory\n" +
     "/new — Start a fresh session (clears context)\n" +
     "/model — Switch Claude model (Opus / Sonnet / Haiku)\n" +
     "/cost — Show token usage for the current session\n" +
     "/session — Get session ID to continue in CLI\n" +
     "/cancel — Abort the current operation\n" +
     "/help — Show this help message\n\n" +
-    "<b>New:</b>\n" +
+    "<b>Features:</b>\n" +
     "• Send documents (PDF, code files, etc.) for analysis\n" +
     "• Reply to any Claude message to include it as context\n" +
     "• Tap Retry on errors to re-run the last prompt\n\n" +
     "<b>Tips:</b>\n" +
-    "• Use /folder to pick which repo Claude works in\n" +
     "• Send a photo with a caption to ask about images\n" +
     "• Claude can read, edit, and create files in your project\n" +
     "• Some tools require your approval via Approve/Deny buttons\n" +
     "• Use /cancel if a response is taking too long";
 
-  // /start command
   bot.command("start", async (ctx) => {
     await ctx.reply(helpText, { parse_mode: "HTML" });
   });
 
-  // /help command
   bot.command("help", async (ctx) => {
     await ctx.reply(helpText, { parse_mode: "HTML" });
   });
 
-  // /new command — fresh session
   bot.command("new", async (ctx) => {
     const chatId = ctx.chat.id;
-    if (isProcessing(chatId)) {
-      cancelQuery(chatId);
+    if (bridge.isProcessing(chatId)) {
+      bridge.cancelQuery(chatId);
     }
-    clearSession(chatId);
+    bridge.clearSession(chatId);
     await ctx.reply("Session cleared. Send a message to start fresh.");
   });
 
-  // /cost command
   bot.command("cost", async (ctx) => {
-    const t = getSessionTokens(ctx.chat.id);
+    const t = bridge.getSessionTokens(ctx.chat.id);
     const total = t.inputTokens + t.outputTokens;
     await ctx.reply(
       `<b>Session tokens</b>\n` +
@@ -147,9 +89,8 @@ export function createBot(): Bot {
     );
   });
 
-  // /model command — select Claude model
   bot.command("model", async (ctx) => {
-    const current = getModel(ctx.chat.id);
+    const current = bridge.getModel(ctx.chat.id);
     const currentLabel =
       AVAILABLE_MODELS.find((m) => m.id === current)?.label || current;
 
@@ -165,57 +106,44 @@ export function createBot(): Bot {
     });
   });
 
-  // /cancel command
   bot.command("cancel", async (ctx) => {
-    if (cancelQuery(ctx.chat.id)) {
+    if (bridge.cancelQuery(ctx.chat.id)) {
       await ctx.reply("Operation cancelled.");
     } else {
       await ctx.reply("Nothing running to cancel.");
     }
   });
 
-  // /session command — get session ID to continue in CLI
   bot.command("session", async (ctx) => {
-    const sessionId = getSessionId(ctx.chat.id);
+    const sessionId = bridge.getSessionId(ctx.chat.id);
     if (!sessionId) {
       await ctx.reply("No active session. Send a message first to start one.");
       return;
     }
-    const cwd = getWorkingDir(ctx.chat.id);
     const cmd = `claude --resume ${sessionId}`;
     await ctx.reply(
       `<b>Session ID</b>\n<code>${sessionId}</code>\n\n` +
         `<b>Continue in CLI</b>\n` +
-        `Run this from <code>${cwd}</code>:\n\n` +
+        `Run this from <code>${botConfig.workingDir}</code>:\n\n` +
         `<code>${cmd}</code>\n\n` +
         `Tap the command above to copy it.`,
       { parse_mode: "HTML" }
     );
   });
 
-  // /folder command — browse and select working directory
-  bot.command("folder", async (ctx) => {
-    const currentDir = getWorkingDir(ctx.chat.id);
-    const keyboard = buildFolderKeyboard(currentDir);
-    await ctx.reply(
-      `<b>Current folder:</b>\n<code>${currentDir}</code>\n\nBrowse and select a working directory:`,
-      { parse_mode: "HTML", reply_markup: keyboard }
-    );
-  });
-
-  function handlePrompt(chatId: number, prompt: string, bot: Bot, replyFn: (text: string) => Promise<{ message_id: number }>) {
+  function handlePrompt(chatId: number, prompt: string, replyFn: (text: string) => Promise<{ message_id: number }>) {
     (async () => {
-      if (isProcessing(chatId)) {
+      if (bridge.isProcessing(chatId)) {
         await bot.api.sendMessage(chatId, "Already processing a request. Use /cancel to abort.");
         return;
       }
 
-      if (isCoolingDown(chatId)) {
+      if (bridge.isCoolingDown(chatId)) {
         await bot.api.sendMessage(chatId, "Slow down — wait a moment before sending again.");
         return;
       }
 
-      setLastPrompt(chatId, prompt);
+      bridge.setLastPrompt(chatId, prompt);
 
       await bot.api.sendChatAction(chatId, "typing");
 
@@ -239,7 +167,6 @@ export function createBot(): Bot {
         }
         lastEditTime = Date.now();
 
-        // Build message: streamed text + activity footer
         let content: string;
         const footer = currentActivity ? `\n\n<i>${currentActivity}</i>` : "";
 
@@ -262,7 +189,6 @@ export function createBot(): Bot {
             parse_mode: "HTML",
           });
         } catch {
-          // Fallback to plain text
           try {
             const plain = buffer.trim()
               ? (buffer.length > 4000 ? buffer.slice(0, 4000) + "\n\n... streaming ..." : buffer) +
@@ -272,9 +198,7 @@ export function createBot(): Bot {
               lastEditedText = plain;
               await bot.api.editMessageText(chatId, thinkingMsgId, plain);
             }
-          } catch {
-            // Ignore edit errors
-          }
+          } catch {}
         }
       };
 
@@ -294,7 +218,7 @@ export function createBot(): Bot {
 
       const onStreamChunk = (chunk: string) => {
         buffer += chunk;
-        currentActivity = ""; // Text streaming is its own indicator
+        currentActivity = "";
         scheduleEdit();
       };
 
@@ -339,11 +263,9 @@ export function createBot(): Bot {
         clearInterval(typingInterval);
         if (editTimer) clearTimeout(editTimer);
 
-        // Use the streamed buffer if result.text is empty (can happen with tool-only responses)
         const finalText = result.text || buffer || "Done.";
 
-        // Log full response to terminal
-        logStream(finalText);
+        logStream(finalText, tag);
 
         const html = claudeToTelegram(finalText);
         const parts = splitMessage(html);
@@ -370,7 +292,7 @@ export function createBot(): Bot {
 
         const seconds = (result.durationMs / 1000).toFixed(1);
         const tokens = result.usage.inputTokens + result.usage.outputTokens;
-        logResult(tokens, result.turns, seconds);
+        logResult(tokens, result.turns, seconds, tag);
         await bot.api
           .sendMessage(
             chatId,
@@ -382,7 +304,7 @@ export function createBot(): Bot {
       const onError = async (error: Error) => {
         clearInterval(typingInterval);
         if (editTimer) clearTimeout(editTimer);
-        logError(error.message);
+        logError(error.message, tag);
 
         const retryId = String(++retryCounter);
         const keyboard = new InlineKeyboard().text("Retry", `retry:${retryId}`);
@@ -401,7 +323,7 @@ export function createBot(): Bot {
         }
       };
 
-      await sendMessage(chatId, prompt, {
+      await bridge.sendMessage(chatId, prompt, {
         onStreamChunk,
         onStatusUpdate,
         onToolApproval,
@@ -409,7 +331,7 @@ export function createBot(): Bot {
         onError,
       });
     })().catch((err) => {
-      console.error("handlePrompt error:", err);
+      console.error(`[${tag}] handlePrompt error:`, err);
     });
   }
 
@@ -417,31 +339,29 @@ export function createBot(): Bot {
     const quoted = ctx.message?.reply_to_message?.text;
     if (!quoted) return "";
     const preview = quoted.length > 500 ? quoted.slice(0, 500) + "..." : quoted;
-    return `[Replying to message: "${preview}"]
-
-`;
+    return `[Replying to message: "${preview}"]\n\n`;
   }
 
   bot.on("message:text", (ctx) => {
     const replyCtx = extractReplyContext(ctx);
     const prompt = replyCtx + ctx.message.text;
-    logUser(ctx.message.text);
-    handlePrompt(ctx.chat.id, prompt, bot, (text) => ctx.reply(text));
+    logUser(ctx.message.text, tag);
+    handlePrompt(ctx.chat.id, prompt, (text) => ctx.reply(text));
   });
 
   bot.on("message:document", async (ctx) => {
     const chatId = ctx.chat.id;
 
-    if (isProcessing(chatId)) {
+    if (bridge.isProcessing(chatId)) {
       await ctx.reply("Already processing a request. Use /cancel to abort.");
       return;
     }
 
     const doc = ctx.message.document;
     const file = await ctx.api.getFile(doc.file_id);
-    const fileUrl = `https://api.telegram.org/file/bot${config.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
+    const fileUrl = `https://api.telegram.org/file/bot${botConfig.token}/${file.file_path}`;
 
-    const tmpDir = path.join(getWorkingDir(chatId), ".tmp-images");
+    const tmpDir = path.join(bridge.workingDir, ".tmp-images");
     fs.mkdirSync(tmpDir, { recursive: true });
     const fileName = doc.file_name || `file-${Date.now()}`;
     const tmpFile = path.join(tmpDir, fileName);
@@ -451,17 +371,17 @@ export function createBot(): Bot {
     fs.writeFileSync(tmpFile, arrayBuf);
 
     const caption = ctx.message.caption || `Analyze this file: ${fileName}`;
-    logUser(`[document: ${fileName}] ${caption}`);
+    logUser(`[document: ${fileName}] ${caption}`, tag);
     const replyCtx = extractReplyContext(ctx);
     const prompt = replyCtx + `I've sent you a file saved at ${tmpFile}\n\nPlease read that file, then respond to this: ${caption}`;
 
-    handlePrompt(chatId, prompt, bot, (text) => ctx.reply(text));
+    handlePrompt(chatId, prompt, (text) => ctx.reply(text));
   });
 
   bot.on("message:photo", async (ctx) => {
     const chatId = ctx.chat.id;
 
-    if (isProcessing(chatId)) {
+    if (bridge.isProcessing(chatId)) {
       await ctx.reply("Already processing a request. Use /cancel to abort.");
       return;
     }
@@ -469,9 +389,9 @@ export function createBot(): Bot {
     const photos = ctx.message.photo;
     const photo = photos[photos.length - 1];
     const file = await ctx.api.getFile(photo.file_id);
-    const fileUrl = `https://api.telegram.org/file/bot${config.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
+    const fileUrl = `https://api.telegram.org/file/bot${botConfig.token}/${file.file_path}`;
 
-    const tmpDir = path.join(getWorkingDir(chatId), ".tmp-images");
+    const tmpDir = path.join(bridge.workingDir, ".tmp-images");
     fs.mkdirSync(tmpDir, { recursive: true });
     const ext = path.extname(file.file_path || ".jpg") || ".jpg";
     const tmpFile = path.join(tmpDir, `tg-${Date.now()}${ext}`);
@@ -481,49 +401,16 @@ export function createBot(): Bot {
     fs.writeFileSync(tmpFile, arrayBuf);
 
     const caption = ctx.message.caption || "Describe this image.";
-    logUser(`[photo] ${caption}`);
+    logUser(`[photo] ${caption}`, tag);
     const replyCtx = extractReplyContext(ctx);
     const prompt = replyCtx + `I've sent you an image saved at ${tmpFile}\n\nPlease read/view that image file, then respond to this: ${caption}`;
 
-    handlePrompt(chatId, prompt, bot, (text) => ctx.reply(text));
+    handlePrompt(chatId, prompt, (text) => ctx.reply(text));
   });
 
-  // Callback query handler for Approve/Deny buttons and model selection
+  // Callback query handler for Approve/Deny, model selection, retry
   bot.on("callback_query:data", async (ctx) => {
     const data = ctx.callbackQuery.data;
-
-    // Folder navigation
-    if (data.startsWith("fd:")) {
-      const dir = folderCache.get(data.slice(3));
-      if (!dir) {
-        await ctx.answerCallbackQuery("Expired. Use /folder again.").catch(() => {});
-        return;
-      }
-      const keyboard = buildFolderKeyboard(dir);
-      await ctx.editMessageText(
-        `<b>Current folder:</b>\n<code>${dir}</code>\n\nBrowse and select a working directory:`,
-        { parse_mode: "HTML", reply_markup: keyboard }
-      ).catch(() => {});
-      await ctx.answerCallbackQuery().catch(() => {});
-      return;
-    }
-
-    // Folder selection
-    if (data.startsWith("sf:")) {
-      const dir = folderCache.get(data.slice(3));
-      if (!dir) {
-        await ctx.answerCallbackQuery("Expired. Use /folder again.").catch(() => {});
-        return;
-      }
-      const chatId = ctx.chat!.id;
-      setWorkingDir(chatId, dir);
-      await ctx.editMessageText(
-        `Working directory set to:\n<code>${dir}</code>\n\nSession reset. Send a message to start working.`,
-        { parse_mode: "HTML" }
-      ).catch(() => {});
-      await ctx.answerCallbackQuery("Folder selected").catch(() => {});
-      return;
-    }
 
     // Model selection
     const modelMatch = data.match(/^model:(.+)$/);
@@ -533,7 +420,7 @@ export function createBot(): Bot {
       const label =
         AVAILABLE_MODELS.find((m) => m.id === modelId)?.label || modelId;
 
-      setModel(chatId, modelId);
+      bridge.setModel(chatId, modelId);
 
       await ctx.editMessageText(
         `Model switched to <b>${label}</b>\nSession reset — next message uses the new model.`,
@@ -545,14 +432,14 @@ export function createBot(): Bot {
 
     if (data.startsWith("retry:")) {
       const chatId = ctx.chat!.id;
-      const lastPrompt = getLastPrompt(chatId);
+      const lastPrompt = bridge.getLastPrompt(chatId);
       if (!lastPrompt) {
         await ctx.answerCallbackQuery("No previous prompt to retry.").catch(() => {});
         return;
       }
       await ctx.editMessageText(`Retrying...`).catch(() => {});
       await ctx.answerCallbackQuery("Retrying").catch(() => {});
-      handlePrompt(chatId, lastPrompt, bot, (text) =>
+      handlePrompt(chatId, lastPrompt, (text) =>
         bot.api.sendMessage(chatId, text)
       );
       return;

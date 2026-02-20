@@ -53,128 +53,6 @@ export const AVAILABLE_MODELS = [
 
 const DEFAULT_MODEL = AVAILABLE_MODELS[0].id;
 
-const STATE_FILE = path.join(config.CLAUDE_WORKING_DIR, ".claude-on-phone-state.json");
-
-interface PersistedState {
-  sessions: Record<string, string>;
-  sessionTokens: Record<string, TokenUsage>;
-  selectedModels: Record<string, string>;
-  workingDirs: Record<string, string>;
-}
-
-const sessions = new Map<number, string>();
-const sessionTokens = new Map<number, TokenUsage>();
-const activeAborts = new Map<number, AbortController>();
-const selectedModels = new Map<number, string>();
-const workingDirs = new Map<number, string>();
-const lastQueryEnd = new Map<number, number>();
-const lastPrompts = new Map<number, string>();
-
-function loadState(): void {
-  try {
-    if (!fs.existsSync(STATE_FILE)) return;
-    const raw: PersistedState = JSON.parse(fs.readFileSync(STATE_FILE, "utf-8"));
-    for (const [k, v] of Object.entries(raw.sessions || {})) sessions.set(Number(k), v);
-    for (const [k, v] of Object.entries(raw.sessionTokens || {})) sessionTokens.set(Number(k), v);
-    for (const [k, v] of Object.entries(raw.selectedModels || {})) selectedModels.set(Number(k), v);
-    for (const [k, v] of Object.entries(raw.workingDirs || {})) workingDirs.set(Number(k), v);
-  } catch {}
-}
-
-function saveState(): void {
-  try {
-    const state: PersistedState = {
-      sessions: Object.fromEntries(sessions),
-      sessionTokens: Object.fromEntries(sessionTokens),
-      selectedModels: Object.fromEntries(selectedModels),
-      workingDirs: Object.fromEntries(workingDirs),
-    };
-    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
-  } catch {}
-}
-
-loadState();
-
-export function isProcessing(chatId: number): boolean {
-  return activeAborts.has(chatId);
-}
-
-export function getSessionTokens(chatId: number): TokenUsage {
-  return sessionTokens.get(chatId) || { inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 };
-}
-
-export function clearSession(chatId: number): void {
-  sessions.delete(chatId);
-  sessionTokens.delete(chatId);
-  workingDirs.delete(chatId);
-  saveState();
-}
-
-export function setModel(chatId: number, modelId: string): void {
-  selectedModels.set(chatId, modelId);
-  sessions.delete(chatId);
-  saveState();
-}
-
-export function getModel(chatId: number): string {
-  return selectedModels.get(chatId) || DEFAULT_MODEL;
-}
-
-export function getSessionId(chatId: number): string | undefined {
-  return sessions.get(chatId);
-}
-
-export function setWorkingDir(chatId: number, dir: string): void {
-  sessions.delete(chatId);
-  sessionTokens.delete(chatId);
-  workingDirs.set(chatId, dir);
-  saveState();
-}
-
-export function getWorkingDir(chatId: number): string {
-  return workingDirs.get(chatId) || config.CLAUDE_WORKING_DIR;
-}
-
-export function cancelQuery(chatId: number): boolean {
-  const controller = activeAborts.get(chatId);
-  if (controller) {
-    controller.abort();
-    activeAborts.delete(chatId);
-    return true;
-  }
-  return false;
-}
-
-const COOLDOWN_MS = 2000;
-
-export function isCoolingDown(chatId: number): boolean {
-  const last = lastQueryEnd.get(chatId);
-  if (!last) return false;
-  return Date.now() - last < COOLDOWN_MS;
-}
-
-export function setLastPrompt(chatId: number, prompt: string): void {
-  lastPrompts.set(chatId, prompt);
-}
-
-export function getLastPrompt(chatId: number): string | undefined {
-  return lastPrompts.get(chatId);
-}
-
-export function cleanupTempFiles(chatId: number): void {
-  try {
-    const cwd = getWorkingDir(chatId);
-    const tmpDir = path.join(cwd, ".tmp-images");
-    if (fs.existsSync(tmpDir)) {
-      const files = fs.readdirSync(tmpDir);
-      for (const f of files) {
-        fs.unlinkSync(path.join(tmpDir, f));
-      }
-      fs.rmdirSync(tmpDir);
-    }
-  } catch {}
-}
-
 // Claude Code-style spinner words shown during thinking
 const THINKING_WORDS = [
   "Thinking...",
@@ -228,152 +106,273 @@ function toolDetail(toolName: string, input: Record<string, unknown>): string {
   }
 }
 
-export async function sendMessage(
-  chatId: number,
-  prompt: string,
-  callbacks: SendCallbacks
-): Promise<void> {
-  const abortController = new AbortController();
-  activeAborts.set(chatId, abortController);
+interface PersistedState {
+  sessions: Record<string, string>;
+  sessionTokens: Record<string, TokenUsage>;
+  selectedModels: Record<string, string>;
+}
 
-  const sessionId = sessions.get(chatId);
-  let hasStreamedText = false;
+export class ClaudeBridge {
+  readonly workingDir: string;
+  readonly botId: number;
+  private readonly tag: string;
+  private readonly stateFile: string;
 
-  // Cycle through thinking words until text starts streaming
-  let wordIdx = Math.floor(Math.random() * THINKING_WORDS.length);
-  const thinkingInterval = setInterval(() => {
-    if (hasStreamedText || abortController.signal.aborted) {
-      clearInterval(thinkingInterval);
-      return;
+  private sessions = new Map<number, string>();
+  private sessionTokens = new Map<number, TokenUsage>();
+  private activeAborts = new Map<number, AbortController>();
+  private selectedModels = new Map<number, string>();
+  private lastQueryEnd = new Map<number, number>();
+  private lastPrompts = new Map<number, string>();
+
+  constructor(botId: number, workingDir: string, tag: string) {
+    this.botId = botId;
+    this.workingDir = workingDir;
+    this.tag = tag;
+    this.stateFile = path.join(config.DATA_DIR, `state-${botId}.json`);
+    this.loadState();
+  }
+
+  private loadState(): void {
+    try {
+      if (!fs.existsSync(this.stateFile)) return;
+      const raw: PersistedState = JSON.parse(fs.readFileSync(this.stateFile, "utf-8"));
+      for (const [k, v] of Object.entries(raw.sessions || {})) this.sessions.set(Number(k), v);
+      for (const [k, v] of Object.entries(raw.sessionTokens || {})) this.sessionTokens.set(Number(k), v);
+      for (const [k, v] of Object.entries(raw.selectedModels || {})) this.selectedModels.set(Number(k), v);
+    } catch {}
+  }
+
+  private saveState(): void {
+    try {
+      fs.mkdirSync(config.DATA_DIR, { recursive: true });
+      const state: PersistedState = {
+        sessions: Object.fromEntries(this.sessions),
+        sessionTokens: Object.fromEntries(this.sessionTokens),
+        selectedModels: Object.fromEntries(this.selectedModels),
+      };
+      fs.writeFileSync(this.stateFile, JSON.stringify(state, null, 2));
+    } catch {}
+  }
+
+  isProcessing(chatId: number): boolean {
+    return this.activeAborts.has(chatId);
+  }
+
+  getSessionTokens(chatId: number): TokenUsage {
+    return this.sessionTokens.get(chatId) || { inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 };
+  }
+
+  clearSession(chatId: number): void {
+    this.sessions.delete(chatId);
+    this.sessionTokens.delete(chatId);
+    this.saveState();
+  }
+
+  setModel(chatId: number, modelId: string): void {
+    this.selectedModels.set(chatId, modelId);
+    this.sessions.delete(chatId);
+    this.saveState();
+  }
+
+  getModel(chatId: number): string {
+    return this.selectedModels.get(chatId) || DEFAULT_MODEL;
+  }
+
+  getSessionId(chatId: number): string | undefined {
+    return this.sessions.get(chatId);
+  }
+
+  cancelQuery(chatId: number): boolean {
+    const controller = this.activeAborts.get(chatId);
+    if (controller) {
+      controller.abort();
+      this.activeAborts.delete(chatId);
+      return true;
     }
-    wordIdx = (wordIdx + 1) % THINKING_WORDS.length;
-    const word = THINKING_WORDS[wordIdx];
-    callbacks.onStatusUpdate(word);
-    logStatus(word);
-  }, 2000);
+    return false;
+  }
 
-  try {
-    const model = selectedModels.get(chatId) || DEFAULT_MODEL;
+  isCoolingDown(chatId: number): boolean {
+    const last = this.lastQueryEnd.get(chatId);
+    if (!last) return false;
+    return Date.now() - last < 2000;
+  }
 
-    const q = query({
-      prompt,
-      options: {
-        cwd: getWorkingDir(chatId),
-        model,
-        includePartialMessages: true,
-        permissionMode: "default",
-        ...(sessionId ? { resume: sessionId } : {}),
-        abortController,
-        canUseTool: async (toolName, input, { signal }) => {
-          if (AUTO_APPROVE_TOOLS.includes(toolName)) {
-            logTool(toolName, toolDetail(toolName, input as Record<string, unknown>));
-            return { behavior: "allow" as const, updatedInput: input };
-          }
+  setLastPrompt(chatId: number, prompt: string): void {
+    this.lastPrompts.set(chatId, prompt);
+  }
 
-          logTool(`${toolName} (awaiting approval)`, toolDetail(toolName, input as Record<string, unknown>));
+  getLastPrompt(chatId: number): string | undefined {
+    return this.lastPrompts.get(chatId);
+  }
 
-          const approved = await Promise.race([
-            callbacks.onToolApproval(
-              toolName,
-              input as Record<string, unknown>
-            ),
-            new Promise<boolean>((resolve) => {
-              if (signal.aborted) {
-                resolve(false);
-                return;
-              }
-              signal.addEventListener("abort", () => resolve(false), {
-                once: true,
-              });
-            }),
-          ]);
+  abortAll(): void {
+    for (const [, controller] of this.activeAborts) {
+      controller.abort();
+    }
+    this.activeAborts.clear();
+  }
 
-          logApproval(toolName, approved);
-
-          if (approved) {
-            return { behavior: "allow" as const, updatedInput: input };
-          }
-          return {
-            behavior: "deny" as const,
-            message: "User denied this action via Telegram",
-          };
-        },
-      },
-    });
-
-    for await (const message of q) {
-      if (abortController.signal.aborted) break;
-
-      if (message.type === "system" && message.subtype === "init") {
-        sessions.set(chatId, message.session_id);
-      } else if (message.type === "stream_event") {
-        const event = message.event as Record<string, unknown>;
-        if (event.type === "content_block_start") {
-          const block = event.content_block as Record<string, unknown> | undefined;
-          if (block?.type === "tool_use" && typeof block.name === "string") {
-            const status = formatToolStatus(block.name);
-            callbacks.onStatusUpdate(status);
-            logStatus(status);
-          } else if (block?.type === "thinking") {
-            callbacks.onStatusUpdate("Thinking deeply...");
-            logStatus("Thinking deeply...");
-          }
-        } else if (event.type === "content_block_delta") {
-          const delta = event.delta as Record<string, unknown> | undefined;
-          if (delta?.type === "text_delta" && typeof delta.text === "string") {
-            if (!hasStreamedText) {
-              hasStreamedText = true;
-              clearInterval(thinkingInterval);
-            }
-            callbacks.onStreamChunk(delta.text);
-          }
+  cleanupTempFiles(): void {
+    try {
+      const tmpDir = path.join(this.workingDir, ".tmp-images");
+      if (fs.existsSync(tmpDir)) {
+        const files = fs.readdirSync(tmpDir);
+        for (const f of files) {
+          fs.unlinkSync(path.join(tmpDir, f));
         }
-      } else if (message.type === "result") {
+        fs.rmdirSync(tmpDir);
+      }
+    } catch {}
+  }
+
+  async sendMessage(
+    chatId: number,
+    prompt: string,
+    callbacks: SendCallbacks
+  ): Promise<void> {
+    const abortController = new AbortController();
+    this.activeAborts.set(chatId, abortController);
+
+    const sessionId = this.sessions.get(chatId);
+    let hasStreamedText = false;
+
+    let wordIdx = Math.floor(Math.random() * THINKING_WORDS.length);
+    const thinkingInterval = setInterval(() => {
+      if (hasStreamedText || abortController.signal.aborted) {
         clearInterval(thinkingInterval);
-        if (message.subtype === "success") {
-          const msg = message as Record<string, unknown>;
-          const rawUsage = msg.usage as Record<string, number> | undefined;
-          const usage: TokenUsage = {
-            inputTokens: rawUsage?.input_tokens || 0,
-            outputTokens: rawUsage?.output_tokens || 0,
-            cacheCreationTokens: rawUsage?.cache_creation_input_tokens || 0,
-            cacheReadTokens: rawUsage?.cache_read_input_tokens || 0,
-          };
+        return;
+      }
+      wordIdx = (wordIdx + 1) % THINKING_WORDS.length;
+      const word = THINKING_WORDS[wordIdx];
+      callbacks.onStatusUpdate(word);
+      logStatus(word, this.tag);
+    }, 2000);
 
-          const prev = sessionTokens.get(chatId) || { inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 };
-          sessionTokens.set(chatId, {
-            inputTokens: prev.inputTokens + usage.inputTokens,
-            outputTokens: prev.outputTokens + usage.outputTokens,
-            cacheCreationTokens: prev.cacheCreationTokens + usage.cacheCreationTokens,
-            cacheReadTokens: prev.cacheReadTokens + usage.cacheReadTokens,
-          });
-          saveState();
+    try {
+      const model = this.selectedModels.get(chatId) || DEFAULT_MODEL;
 
-          callbacks.onResult({
-            text: msg.result as string || "",
-            usage,
-            turns: msg.num_turns as number || 0,
-            durationMs: msg.duration_ms as number || 0,
-          });
-        } else {
-          const errors = (message as Record<string, unknown>).errors as string[] | undefined;
-          callbacks.onError(
-            new Error(errors?.join(", ") || "Claude query failed")
-          );
+      const q = query({
+        prompt,
+        options: {
+          cwd: this.workingDir,
+          model,
+          includePartialMessages: true,
+          permissionMode: "default",
+          ...(sessionId ? { resume: sessionId } : {}),
+          abortController,
+          canUseTool: async (toolName, input, { signal }) => {
+            if (AUTO_APPROVE_TOOLS.includes(toolName)) {
+              logTool(toolName, toolDetail(toolName, input as Record<string, unknown>), this.tag);
+              return { behavior: "allow" as const, updatedInput: input };
+            }
+
+            logTool(`${toolName} (awaiting approval)`, toolDetail(toolName, input as Record<string, unknown>), this.tag);
+
+            const approved = await Promise.race([
+              callbacks.onToolApproval(
+                toolName,
+                input as Record<string, unknown>
+              ),
+              new Promise<boolean>((resolve) => {
+                if (signal.aborted) {
+                  resolve(false);
+                  return;
+                }
+                signal.addEventListener("abort", () => resolve(false), {
+                  once: true,
+                });
+              }),
+            ]);
+
+            logApproval(toolName, approved, this.tag);
+
+            if (approved) {
+              return { behavior: "allow" as const, updatedInput: input };
+            }
+            return {
+              behavior: "deny" as const,
+              message: "User denied this action via Telegram",
+            };
+          },
+        },
+      });
+
+      for await (const message of q) {
+        if (abortController.signal.aborted) break;
+
+        if (message.type === "system" && message.subtype === "init") {
+          this.sessions.set(chatId, message.session_id);
+        } else if (message.type === "stream_event") {
+          const event = message.event as Record<string, unknown>;
+          if (event.type === "content_block_start") {
+            const block = event.content_block as Record<string, unknown> | undefined;
+            if (block?.type === "tool_use" && typeof block.name === "string") {
+              const status = formatToolStatus(block.name);
+              callbacks.onStatusUpdate(status);
+              logStatus(status, this.tag);
+            } else if (block?.type === "thinking") {
+              callbacks.onStatusUpdate("Thinking deeply...");
+              logStatus("Thinking deeply...", this.tag);
+            }
+          } else if (event.type === "content_block_delta") {
+            const delta = event.delta as Record<string, unknown> | undefined;
+            if (delta?.type === "text_delta" && typeof delta.text === "string") {
+              if (!hasStreamedText) {
+                hasStreamedText = true;
+                clearInterval(thinkingInterval);
+              }
+              callbacks.onStreamChunk(delta.text);
+            }
+          }
+        } else if (message.type === "result") {
+          clearInterval(thinkingInterval);
+          if (message.subtype === "success") {
+            const msg = message as Record<string, unknown>;
+            const rawUsage = msg.usage as Record<string, number> | undefined;
+            const usage: TokenUsage = {
+              inputTokens: rawUsage?.input_tokens || 0,
+              outputTokens: rawUsage?.output_tokens || 0,
+              cacheCreationTokens: rawUsage?.cache_creation_input_tokens || 0,
+              cacheReadTokens: rawUsage?.cache_read_input_tokens || 0,
+            };
+
+            const prev = this.sessionTokens.get(chatId) || { inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 };
+            this.sessionTokens.set(chatId, {
+              inputTokens: prev.inputTokens + usage.inputTokens,
+              outputTokens: prev.outputTokens + usage.outputTokens,
+              cacheCreationTokens: prev.cacheCreationTokens + usage.cacheCreationTokens,
+              cacheReadTokens: prev.cacheReadTokens + usage.cacheReadTokens,
+            });
+            this.saveState();
+
+            callbacks.onResult({
+              text: msg.result as string || "",
+              usage,
+              turns: msg.num_turns as number || 0,
+              durationMs: msg.duration_ms as number || 0,
+            });
+          } else {
+            const errors = (message as Record<string, unknown>).errors as string[] | undefined;
+            callbacks.onError(
+              new Error(errors?.join(", ") || "Claude query failed")
+            );
+          }
         }
       }
+    } catch (error) {
+      clearInterval(thinkingInterval);
+      if (!abortController.signal.aborted) {
+        callbacks.onError(
+          error instanceof Error ? error : new Error(String(error))
+        );
+      }
+    } finally {
+      clearInterval(thinkingInterval);
+      this.activeAborts.delete(chatId);
+      this.lastQueryEnd.set(chatId, Date.now());
+      this.cleanupTempFiles();
     }
-  } catch (error) {
-    clearInterval(thinkingInterval);
-    if (!abortController.signal.aborted) {
-      callbacks.onError(
-        error instanceof Error ? error : new Error(String(error))
-      );
-    }
-  } finally {
-    clearInterval(thinkingInterval);
-    activeAborts.delete(chatId);
-    lastQueryEnd.set(chatId, Date.now());
-    cleanupTempFiles(chatId);
   }
 }
