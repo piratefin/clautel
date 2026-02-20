@@ -11,6 +11,8 @@ import {
   setModel,
   getModel,
   getSessionId,
+  setWorkingDir,
+  getWorkingDir,
   AVAILABLE_MODELS,
 } from "./claude.js";
 import {
@@ -27,6 +29,46 @@ const pendingApprovals = new Map<
 >();
 
 let approvalCounter = 0;
+
+const folderCache = new Map<string, string>();
+let folderIdCounter = 0;
+
+function getFolderId(dirPath: string): string {
+  for (const [id, p] of folderCache) {
+    if (p === dirPath) return id;
+  }
+  const id = String(++folderIdCounter);
+  folderCache.set(id, dirPath);
+  return id;
+}
+
+function buildFolderKeyboard(dir: string): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+
+  const parent = path.dirname(dir);
+  if (parent !== dir) {
+    const pid = getFolderId(parent);
+    keyboard.text(`.. (${path.basename(parent) || "/"})`, `fd:${pid}`).row();
+  }
+
+  try {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    const dirs = entries
+      .filter((e) => e.isDirectory() && !e.name.startsWith("."))
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .slice(0, 20);
+
+    for (const d of dirs) {
+      const full = path.join(dir, d.name);
+      const fid = getFolderId(full);
+      keyboard.text(`📁 ${d.name}`, `fd:${fid}`).row();
+    }
+  } catch {}
+
+  const selId = getFolderId(dir);
+  keyboard.text("✅ Select this folder", `sf:${selId}`).row();
+  return keyboard;
+}
 
 export function createBot(): Bot {
   const bot = new Bot(config.TELEGRAM_BOT_TOKEN);
@@ -49,6 +91,7 @@ export function createBot(): Bot {
     "<b>Claude on Phone</b>\n\n" +
     "Send any text or photo to interact with Claude Code.\n\n" +
     "<b>Commands:</b>\n" +
+    "/folder — Browse and select a working directory\n" +
     "/new — Start a fresh session (clears context)\n" +
     "/model — Switch Claude model (Opus / Sonnet / Haiku)\n" +
     "/cost — Show token usage for the current session\n" +
@@ -56,6 +99,7 @@ export function createBot(): Bot {
     "/cancel — Abort the current operation\n" +
     "/help — Show this help message\n\n" +
     "<b>Tips:</b>\n" +
+    "• Use /folder to pick which repo Claude works in\n" +
     "• Send a photo with a caption to ask about images\n" +
     "• Claude can read, edit, and create files in your project\n" +
     "• Some tools require your approval via Approve/Deny buttons\n" +
@@ -130,14 +174,25 @@ export function createBot(): Bot {
       await ctx.reply("No active session. Send a message first to start one.");
       return;
     }
+    const cwd = getWorkingDir(ctx.chat.id);
     const cmd = `claude --resume ${sessionId}`;
     await ctx.reply(
       `<b>Session ID</b>\n<code>${sessionId}</code>\n\n` +
         `<b>Continue in CLI</b>\n` +
-        `Run this from <code>${config.CLAUDE_WORKING_DIR}</code>:\n\n` +
+        `Run this from <code>${cwd}</code>:\n\n` +
         `<code>${cmd}</code>\n\n` +
         `Tap the command above to copy it.`,
       { parse_mode: "HTML" }
+    );
+  });
+
+  // /folder command — browse and select working directory
+  bot.command("folder", async (ctx) => {
+    const currentDir = getWorkingDir(ctx.chat.id);
+    const keyboard = buildFolderKeyboard(currentDir);
+    await ctx.reply(
+      `<b>Current folder:</b>\n<code>${currentDir}</code>\n\nBrowse and select a working directory:`,
+      { parse_mode: "HTML", reply_markup: keyboard }
     );
   });
 
@@ -153,6 +208,7 @@ export function createBot(): Bot {
       const thinkingMsgId = thinking.message_id;
 
       let buffer = "";
+      let currentActivity = "Thinking...";
       let lastEditTime = 0;
       let editTimer: NodeJS.Timeout | null = null;
       let lastEditedText = "";
@@ -164,25 +220,37 @@ export function createBot(): Bot {
         }
         lastEditTime = Date.now();
 
-        let html = claudeToTelegram(buffer);
-        if (html.length > 4000) {
-          html = html.slice(0, 4000) + "\n\n<i>... streaming ...</i>";
+        // Build message: streamed text + activity footer
+        let content: string;
+        const footer = currentActivity ? `\n\n<i>${currentActivity}</i>` : "";
+
+        if (buffer.trim()) {
+          let html = claudeToTelegram(buffer);
+          const maxLen = 4000 - footer.length;
+          if (html.length > maxLen) {
+            html = html.slice(0, maxLen) + "\n\n<i>... streaming ...</i>";
+          }
+          content = html + footer;
+        } else {
+          content = footer.trim() || "<i>Thinking...</i>";
         }
 
-        if (!html.trim() || html === lastEditedText) return;
-        lastEditedText = html;
+        if (!content.trim() || content === lastEditedText) return;
+        lastEditedText = content;
 
         try {
-          await bot.api.editMessageText(chatId, thinkingMsgId, html, {
+          await bot.api.editMessageText(chatId, thinkingMsgId, content, {
             parse_mode: "HTML",
           });
         } catch {
+          // Fallback to plain text
           try {
-            const plain =
-              buffer.length > 4000
-                ? buffer.slice(0, 4000) + "\n\n... streaming ..."
-                : buffer;
-            if (plain.trim()) {
+            const plain = buffer.trim()
+              ? (buffer.length > 4000 ? buffer.slice(0, 4000) + "\n\n... streaming ..." : buffer) +
+                (currentActivity ? `\n\n${currentActivity}` : "")
+              : currentActivity || "Thinking...";
+            if (plain !== lastEditedText) {
+              lastEditedText = plain;
               await bot.api.editMessageText(chatId, thinkingMsgId, plain);
             }
           } catch {
@@ -191,29 +259,24 @@ export function createBot(): Bot {
         }
       };
 
-      const onStatusUpdate = (status: string) => {
-        // Only update the Telegram message if no text has streamed yet
-        if (!buffer.trim()) {
-          const now = Date.now();
-          if (now - lastEditTime >= 1500) {
-            lastEditTime = now;
-            const text = `<i>${status}</i>`;
-            if (text !== lastEditedText) {
-              lastEditedText = text;
-              bot.api.editMessageText(chatId, thinkingMsgId, text, { parse_mode: "HTML" }).catch(() => {});
-            }
-          }
-        }
-      };
-
-      const onStreamChunk = (chunk: string) => {
-        buffer += chunk;
+      const scheduleEdit = () => {
         const now = Date.now();
         if (now - lastEditTime >= 1500) {
           doEdit();
         } else if (!editTimer) {
           editTimer = setTimeout(doEdit, 1500 - (now - lastEditTime));
         }
+      };
+
+      const onStatusUpdate = (status: string) => {
+        currentActivity = status;
+        scheduleEdit();
+      };
+
+      const onStreamChunk = (chunk: string) => {
+        buffer += chunk;
+        currentActivity = ""; // Text streaming is its own indicator
+        scheduleEdit();
       };
 
       const onToolApproval = (
@@ -342,7 +405,7 @@ export function createBot(): Bot {
     const file = await ctx.api.getFile(photo.file_id);
     const fileUrl = `https://api.telegram.org/file/bot${config.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
 
-    const tmpDir = path.join(config.CLAUDE_WORKING_DIR, ".tmp-images");
+    const tmpDir = path.join(getWorkingDir(chatId), ".tmp-images");
     fs.mkdirSync(tmpDir, { recursive: true });
     const ext = path.extname(file.file_path || ".jpg") || ".jpg";
     const tmpFile = path.join(tmpDir, `tg-${Date.now()}${ext}`);
@@ -361,6 +424,39 @@ export function createBot(): Bot {
   // Callback query handler for Approve/Deny buttons and model selection
   bot.on("callback_query:data", async (ctx) => {
     const data = ctx.callbackQuery.data;
+
+    // Folder navigation
+    if (data.startsWith("fd:")) {
+      const dir = folderCache.get(data.slice(3));
+      if (!dir) {
+        await ctx.answerCallbackQuery("Expired. Use /folder again.").catch(() => {});
+        return;
+      }
+      const keyboard = buildFolderKeyboard(dir);
+      await ctx.editMessageText(
+        `<b>Current folder:</b>\n<code>${dir}</code>\n\nBrowse and select a working directory:`,
+        { parse_mode: "HTML", reply_markup: keyboard }
+      ).catch(() => {});
+      await ctx.answerCallbackQuery().catch(() => {});
+      return;
+    }
+
+    // Folder selection
+    if (data.startsWith("sf:")) {
+      const dir = folderCache.get(data.slice(3));
+      if (!dir) {
+        await ctx.answerCallbackQuery("Expired. Use /folder again.").catch(() => {});
+        return;
+      }
+      const chatId = ctx.chat!.id;
+      setWorkingDir(chatId, dir);
+      await ctx.editMessageText(
+        `Working directory set to:\n<code>${dir}</code>\n\nSession reset. Send a message to start working.`,
+        { parse_mode: "HTML" }
+      ).catch(() => {});
+      await ctx.answerCallbackQuery("Folder selected").catch(() => {});
+      return;
+    }
 
     // Model selection
     const modelMatch = data.match(/^model:(.+)$/);

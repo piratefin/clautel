@@ -59,6 +59,8 @@ const sessionTokens = new Map<number, TokenUsage>();
 const activeAborts = new Map<number, AbortController>();
 // chatId → selected model
 const selectedModels = new Map<number, string>();
+// chatId → working directory
+const workingDirs = new Map<number, string>();
 
 export function isProcessing(chatId: number): boolean {
   return activeAborts.has(chatId);
@@ -71,6 +73,7 @@ export function getSessionTokens(chatId: number): TokenUsage {
 export function clearSession(chatId: number): void {
   sessions.delete(chatId);
   sessionTokens.delete(chatId);
+  workingDirs.delete(chatId);
 }
 
 export function setModel(chatId: number, modelId: string): void {
@@ -84,6 +87,16 @@ export function getModel(chatId: number): string {
 
 export function getSessionId(chatId: number): string | undefined {
   return sessions.get(chatId);
+}
+
+export function setWorkingDir(chatId: number, dir: string): void {
+  sessions.delete(chatId);
+  sessionTokens.delete(chatId);
+  workingDirs.set(chatId, dir);
+}
+
+export function getWorkingDir(chatId: number): string {
+  return workingDirs.get(chatId) || config.CLAUDE_WORKING_DIR;
 }
 
 export function cancelQuery(chatId: number): boolean {
@@ -179,7 +192,7 @@ export async function sendMessage(
     const q = query({
       prompt,
       options: {
-        cwd: config.CLAUDE_WORKING_DIR,
+        cwd: getWorkingDir(chatId),
         model,
         includePartialMessages: true,
         permissionMode: "default",
