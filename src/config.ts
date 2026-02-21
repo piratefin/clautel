@@ -1,3 +1,5 @@
+import path from "node:path";
+import os from "node:os";
 import "dotenv/config";
 
 function required(name: string): string {
@@ -13,5 +15,5 @@ export const config = {
   TELEGRAM_BOT_TOKEN: required("TELEGRAM_BOT_TOKEN"),
   TELEGRAM_OWNER_ID: Number(required("TELEGRAM_OWNER_ID")),
   NGROK_AUTH_TOKEN: required("NGROK_AUTH_TOKEN"),
-  CLAUDE_WORKING_DIR: process.env.CLAUDE_WORKING_DIR || process.cwd(),
+  DATA_DIR: path.join(os.homedir(), ".claude-on-phone"),
 };

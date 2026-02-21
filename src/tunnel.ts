@@ -1,14 +1,9 @@
 import ngrok from "@ngrok/ngrok";
-import type { Bot } from "grammy";
 import { config } from "./config.js";
 
 let listener: ngrok.Listener | null = null;
 
-export async function startTunnel(
-  bot: Bot,
-  port: number,
-  webhookSecret: string
-): Promise<string> {
+export async function startTunnel(port: number): Promise<string> {
   listener = await ngrok.connect({
     addr: port,
     authtoken: config.NGROK_AUTH_TOKEN,
@@ -16,12 +11,6 @@ export async function startTunnel(
 
   const url = listener.url()!;
   console.log(`ngrok tunnel: ${url}`);
-
-  await bot.api.setWebhook(`${url}/webhook`, {
-    secret_token: webhookSecret,
-  });
-  console.log("Telegram webhook registered");
-
   return url;
 }
 
