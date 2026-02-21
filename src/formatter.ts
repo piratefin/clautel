@@ -81,11 +81,37 @@ export function claudeToTelegram(markdown: string): string {
   return result;
 }
 
+// Telegram-supported HTML tags that we need to track across splits
+const PAIRED_TAGS = ["b", "i", "s", "u", "code", "pre", "blockquote"];
+
+function getOpenTags(html: string): string[] {
+  const stack: string[] = [];
+  const tagRe = /<\/?([a-z]+)(?:\s[^>]*)?>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = tagRe.exec(html)) !== null) {
+    const full = m[0];
+    const tagName = m[1].toLowerCase();
+    if (!PAIRED_TAGS.includes(tagName)) continue;
+    if (full.startsWith("</")) {
+      // closing tag — pop the most recent matching open tag
+      const idx = stack.lastIndexOf(tagName);
+      if (idx !== -1) stack.splice(idx, 1);
+    } else {
+      stack.push(tagName);
+    }
+  }
+  return stack;
+}
+
+// Max extra bytes closing tags can add (e.g. </blockquote></pre></code></b></i></s></u>)
+const TAG_RESERVE = 80;
+
 export function splitMessage(text: string, limit = 4096): string[] {
   if (text.length <= limit) return [text];
 
   const messages: string[] = [];
   let remaining = text;
+  const effectiveLimit = limit - TAG_RESERVE;
 
   while (remaining.length > 0) {
     if (remaining.length <= limit) {
@@ -93,13 +119,13 @@ export function splitMessage(text: string, limit = 4096): string[] {
       break;
     }
 
-    // Find a good split point near the limit
-    let splitIdx = remaining.lastIndexOf("\n", limit);
-    if (splitIdx < limit * 0.3) {
-      splitIdx = remaining.lastIndexOf(" ", limit);
+    // Find a good split point near the limit, leaving room for closing tags
+    let splitIdx = remaining.lastIndexOf("\n", effectiveLimit);
+    if (splitIdx < effectiveLimit * 0.3) {
+      splitIdx = remaining.lastIndexOf(" ", effectiveLimit);
     }
-    if (splitIdx < limit * 0.3) {
-      splitIdx = limit;
+    if (splitIdx < effectiveLimit * 0.3) {
+      splitIdx = effectiveLimit;
     }
 
     // Don't split inside an HTML tag — back up to before the last unclosed '<'
@@ -110,8 +136,21 @@ export function splitMessage(text: string, limit = 4096): string[] {
       splitIdx = lastLt;
     }
 
-    messages.push(remaining.slice(0, splitIdx));
+    let chunk = remaining.slice(0, splitIdx);
+
+    // Close any tags that are still open in this chunk
+    const openTags = getOpenTags(chunk);
+    if (openTags.length > 0) {
+      chunk += openTags.slice().reverse().map((t) => `</${t}>`).join("");
+    }
+
+    messages.push(chunk);
     remaining = remaining.slice(splitIdx).trimStart();
+
+    // Re-open tags at the start of the next chunk
+    if (openTags.length > 0 && remaining.length > 0) {
+      remaining = openTags.map((t) => `<${t}>`).join("") + remaining;
+    }
   }
 
   return messages;

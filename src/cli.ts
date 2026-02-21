@@ -10,6 +10,10 @@ const DATA_DIR = path.join(os.homedir(), ".claude-on-phone");
 const PID_FILE = path.join(DATA_DIR, "daemon.pid");
 const LOG_FILE = path.join(DATA_DIR, "app.log");
 const CONFIG_FILE = path.join(DATA_DIR, "config.json");
+const LOG_MAX_BYTES = 5 * 1024 * 1024; // 5 MB
+const LOG_KEEP_COUNT = 3; // keep app.log.1, app.log.2, app.log.3
+
+const LAUNCHD_LABEL = "com.claude-on-phone.daemon";
 
 // Resolve daemon path: prefer compiled dist/daemon.js, fall back to tsx for local dev
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -19,6 +23,23 @@ const srcDaemon = path.join(__dirname, "../src/daemon.ts");
 const DAEMON_CMD: [string, string[]] = fs.existsSync(compiledDaemon)
   ? [process.execPath, [compiledDaemon]]
   : ["npx", ["tsx", srcDaemon]];
+
+function rotateLog(): void {
+  try {
+    if (!fs.existsSync(LOG_FILE)) return;
+    const stat = fs.statSync(LOG_FILE);
+    if (stat.size < LOG_MAX_BYTES) return;
+
+    // Shift existing rotated logs: app.log.2 → app.log.3, app.log.1 → app.log.2, etc.
+    for (let i = LOG_KEEP_COUNT - 1; i >= 1; i--) {
+      const from = `${LOG_FILE}.${i}`;
+      const to = `${LOG_FILE}.${i + 1}`;
+      if (fs.existsSync(from)) fs.renameSync(from, to);
+    }
+    // Current log becomes app.log.1
+    fs.renameSync(LOG_FILE, `${LOG_FILE}.1`);
+  } catch {}
+}
 
 function isRunning(pid: number): boolean {
   try {
@@ -64,10 +85,11 @@ async function cmdSetup(): Promise<void> {
     process.exit(1);
   }
 
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
   fs.writeFileSync(
     CONFIG_FILE,
-    JSON.stringify({ TELEGRAM_BOT_TOKEN: token, TELEGRAM_OWNER_ID: ownerId }, null, 2)
+    JSON.stringify({ TELEGRAM_BOT_TOKEN: token, TELEGRAM_OWNER_ID: ownerId }, null, 2),
+    { mode: 0o600 }
   );
 
   console.log(`\nConfig saved to ${CONFIG_FILE}`);
@@ -87,6 +109,7 @@ function cmdStart(): void {
   }
 
   fs.mkdirSync(DATA_DIR, { recursive: true });
+  rotateLog();
 
   const logFd = fs.openSync(LOG_FILE, "a");
 
@@ -97,6 +120,7 @@ function cmdStart(): void {
   });
 
   child.unref();
+  fs.closeSync(logFd);
   fs.writeFileSync(PID_FILE, String(child.pid));
 
   console.log(`Started (PID ${child.pid})`);
@@ -140,6 +164,84 @@ function cmdLogs(): void {
   });
 }
 
+function getPlistPath(): string {
+  return path.join(os.homedir(), "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
+}
+
+function cmdInstallService(): void {
+  if (process.platform !== "darwin") {
+    console.error("install-service is only supported on macOS (launchd).");
+    process.exit(1);
+  }
+
+  if (!fs.existsSync(CONFIG_FILE)) {
+    console.error("Not configured. Run: claude-on-phone setup");
+    process.exit(1);
+  }
+
+  const [cmd, args] = DAEMON_CMD;
+  const programArgs = [cmd, ...args];
+
+  const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${LAUNCHD_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    ${programArgs.map((a) => `<string>${a}</string>`).join("\n    ")}
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>${LOG_FILE}</string>
+  <key>StandardErrorPath</key>
+  <string>${LOG_FILE}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>${process.env.PATH || "/usr/local/bin:/usr/bin:/bin"}</string>
+  </dict>
+</dict>
+</plist>`;
+
+  const agentsDir = path.dirname(getPlistPath());
+  fs.mkdirSync(agentsDir, { recursive: true });
+  fs.writeFileSync(getPlistPath(), plist);
+
+  const load = spawn("launchctl", ["load", getPlistPath()], { stdio: "inherit" });
+  load.on("close", (code) => {
+    if (code === 0) {
+      console.log("Service installed and started.");
+      console.log(`Plist: ${getPlistPath()}`);
+      console.log("The daemon will auto-restart on crash and start at login.");
+    } else {
+      console.error("Failed to load service. Check: launchctl list | grep claude");
+    }
+  });
+}
+
+function cmdUninstallService(): void {
+  if (process.platform !== "darwin") {
+    console.error("uninstall-service is only supported on macOS (launchd).");
+    process.exit(1);
+  }
+
+  if (!fs.existsSync(getPlistPath())) {
+    console.log("Service not installed.");
+    return;
+  }
+
+  const unload = spawn("launchctl", ["unload", getPlistPath()], { stdio: "inherit" });
+  unload.on("close", () => {
+    fs.rmSync(getPlistPath(), { force: true });
+    console.log("Service uninstalled.");
+  });
+}
+
 function cmdHelp(): void {
   console.log(`
 Claude on Phone — Telegram bridge for Claude Code
@@ -147,12 +249,14 @@ Claude on Phone — Telegram bridge for Claude Code
 Usage: claude-on-phone <command>
 
 Commands:
-  setup    Configure your bot token and Telegram user ID
-  start    Start the daemon in the background
-  stop     Stop the daemon
-  status   Show whether the daemon is running
-  logs     Tail the daemon logs (Ctrl+C to exit)
-  help     Show this help message
+  setup              Configure your bot token and Telegram user ID
+  start              Start the daemon in the background
+  stop               Stop the daemon
+  status             Show whether the daemon is running
+  logs               Tail the daemon logs (Ctrl+C to exit)
+  install-service    Install as a macOS launchd service (auto-restart)
+  uninstall-service  Remove the launchd service
+  help               Show this help message
 
 Getting started:
   1. claude-on-phone setup
@@ -179,6 +283,12 @@ switch (command) {
     break;
   case "logs":
     cmdLogs();
+    break;
+  case "install-service":
+    cmdInstallService();
+    break;
+  case "uninstall-service":
+    cmdUninstallService();
     break;
   default:
     cmdHelp();

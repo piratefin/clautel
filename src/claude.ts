@@ -1,8 +1,12 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { query } from "@anthropic-ai/claude-code";
 import { config } from "./config.js";
 import { logTool, logApproval, logStatus } from "./log.js";
+
+const COOLDOWN_MS = 2000;
+const THINKING_ROTATE_MS = 2000;
 
 const AUTO_APPROVE_TOOLS = [
   "Read",
@@ -173,13 +177,13 @@ export class ClaudeBridge {
 
   private saveState(): void {
     try {
-      fs.mkdirSync(config.DATA_DIR, { recursive: true });
+      fs.mkdirSync(config.DATA_DIR, { recursive: true, mode: 0o700 });
       const state: PersistedState = {
         sessions: Object.fromEntries(this.sessions),
         sessionTokens: Object.fromEntries(this.sessionTokens),
         selectedModels: Object.fromEntries(this.selectedModels),
       };
-      fs.writeFileSync(this.stateFile, JSON.stringify(state, null, 2));
+      fs.writeFileSync(this.stateFile, JSON.stringify(state, null, 2), { mode: 0o600 });
     } catch {}
   }
 
@@ -225,7 +229,7 @@ export class ClaudeBridge {
   isCoolingDown(chatId: number): boolean {
     const last = this.lastQueryEnd.get(chatId);
     if (!last) return false;
-    return Date.now() - last < 2000;
+    return Date.now() - last < COOLDOWN_MS;
   }
 
   setLastPrompt(chatId: number, prompt: string): void {
@@ -243,9 +247,13 @@ export class ClaudeBridge {
     this.activeAborts.clear();
   }
 
+  getTempDir(): string {
+    return path.join(os.tmpdir(), `claude-on-phone-${this.botId}`);
+  }
+
   cleanupTempFiles(): void {
     try {
-      const tmpDir = path.join(this.workingDir, ".tmp-images");
+      const tmpDir = this.getTempDir();
       if (fs.existsSync(tmpDir)) {
         const files = fs.readdirSync(tmpDir);
         for (const f of files) {
@@ -277,7 +285,7 @@ export class ClaudeBridge {
       const word = THINKING_WORDS[wordIdx];
       callbacks.onStatusUpdate(word);
       logStatus(word, this.tag);
-    }, 2000);
+    }, THINKING_ROTATE_MS);
 
     try {
       const model = this.selectedModels.get(chatId) || DEFAULT_MODEL;

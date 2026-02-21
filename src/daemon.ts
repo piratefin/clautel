@@ -9,8 +9,10 @@ import type { BotConfig } from "./store.js";
 import { DATA_DIR } from "./config.js";
 
 const PID_FILE = path.join(DATA_DIR, "daemon.pid");
+const HEALTH_CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
 const activeWorkers = new Map<number, { config: BotConfig; bot: Bot; bridge: ClaudeBridge }>();
+let healthCheckTimer: NodeJS.Timeout | null = null;
 
 const WORKER_COMMANDS = [
   { command: "new",     description: "Start a fresh session" },
@@ -70,7 +72,7 @@ function getActiveWorkers(): Map<number, { config: BotConfig }> {
 
 async function main() {
   // Write our own PID so the CLI can detect us even if launched via npm start
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
   fs.writeFileSync(PID_FILE, String(process.pid));
 
   const managerBot = createManager({ startWorker, stopWorker, getActiveWorkers });
@@ -96,6 +98,25 @@ async function main() {
     }
   }
 
+  // Periodic health check: verify worker bots are still reachable
+  healthCheckTimer = setInterval(async () => {
+    const deadIds: number[] = [];
+    for (const [id, worker] of activeWorkers) {
+      try {
+        await worker.bot.api.getMe();
+      } catch (err) {
+        console.error(`[${worker.config.username}] Health check failed, removing: ${(err as Error).message}`);
+        worker.bridge.abortAll();
+        try { await worker.bot.stop(); } catch {}
+        deadIds.push(id);
+      }
+    }
+    for (const id of deadIds) {
+      activeWorkers.delete(id);
+      removeBot(id);
+    }
+  }, HEALTH_CHECK_INTERVAL_MS);
+
   // Start manager bot polling — keeps the process alive
   await managerBot.start({
     onStart: (info) => {
@@ -108,6 +129,7 @@ async function main() {
 
 const shutdown = async () => {
   console.log("\nShutting down...");
+  if (healthCheckTimer) clearInterval(healthCheckTimer);
   for (const [, worker] of activeWorkers) {
     worker.bridge.abortAll();
     try { await worker.bot.stop(); } catch {}
