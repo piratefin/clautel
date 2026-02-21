@@ -17,7 +17,7 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
 
   const pendingApprovals = new Map<
     string,
-    { resolve: (approved: boolean) => void; timer: NodeJS.Timeout }
+    { resolve: (result: "allow" | "always" | "deny") => void; timer: NodeJS.Timeout }
   >();
   let approvalCounter = 0;
   let retryCounter = 0;
@@ -225,13 +225,13 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
       const onToolApproval = (
         toolName: string,
         input: Record<string, unknown>
-      ): Promise<boolean> => {
-        return new Promise<boolean>((resolve) => {
+      ): Promise<"allow" | "always" | "deny"> => {
+        return new Promise((resolve) => {
           const requestId = String(++approvalCounter);
 
           const timer = setTimeout(() => {
             pendingApprovals.delete(requestId);
-            resolve(false);
+            resolve("deny");
           }, 5 * 60 * 1000);
 
           pendingApprovals.set(requestId, { resolve, timer });
@@ -239,6 +239,8 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
           const description = formatToolCall(toolName, input);
           const keyboard = new InlineKeyboard()
             .text("Approve", `approve:${requestId}`)
+            .text("Always Allow", `alwaysallow:${requestId}`)
+            .row()
             .text("Deny", `deny:${requestId}`);
 
           bot.api
@@ -249,7 +251,7 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
             .catch(() => {
               clearTimeout(timer);
               pendingApprovals.delete(requestId);
-              resolve(false);
+              resolve("deny");
             });
         });
       };
@@ -445,7 +447,7 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
       return;
     }
 
-    const match = data.match(/^(approve|deny):(\d+)$/);
+    const match = data.match(/^(approve|alwaysallow|deny):(\d+)$/);
     if (!match) {
       await ctx.answerCallbackQuery("Invalid action").catch(() => {});
       return;
@@ -462,16 +464,29 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
     clearTimeout(pending.timer);
     pendingApprovals.delete(requestId);
 
-    const approved = action === "approve";
-    pending.resolve(approved);
+    const result: "allow" | "always" | "deny" =
+      action === "approve"     ? "allow"  :
+      action === "alwaysallow" ? "always" :
+                                 "deny";
 
-    const statusLabel = approved ? "APPROVED" : "DENIED";
+    pending.resolve(result);
+
+    const statusLabel =
+      result === "allow"  ? "APPROVED" :
+      result === "always" ? "ALWAYS ALLOWED" :
+                            "DENIED";
+
     try {
       const originalText = ctx.callbackQuery.message?.text || "";
       await ctx.editMessageText(`[${statusLabel}]\n${originalText}`);
     } catch {}
 
-    await ctx.answerCallbackQuery(approved ? "Approved" : "Denied").catch(() => {});
+    const answerText =
+      result === "allow"  ? "Approved" :
+      result === "always" ? "Allowed for this session" :
+                            "Denied";
+
+    await ctx.answerCallbackQuery(answerText).catch(() => {});
   });
 
   return bot;

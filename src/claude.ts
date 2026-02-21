@@ -35,7 +35,7 @@ export interface SendCallbacks {
   onToolApproval: (
     toolName: string,
     input: Record<string, unknown>
-  ) => Promise<boolean>;
+  ) => Promise<"allow" | "always" | "deny">;
   onResult: (result: {
     text: string;
     usage: TokenUsage;
@@ -124,6 +124,7 @@ export class ClaudeBridge {
   private selectedModels = new Map<number, string>();
   private lastQueryEnd = new Map<number, number>();
   private lastPrompts = new Map<number, string>();
+  private sessionApprovedTools = new Map<number, Set<string>>();
 
   constructor(botId: number, workingDir: string, tag: string) {
     this.botId = botId;
@@ -166,6 +167,7 @@ export class ClaudeBridge {
   clearSession(chatId: number): void {
     this.sessions.delete(chatId);
     this.sessionTokens.delete(chatId);
+    this.sessionApprovedTools.delete(chatId);
     this.saveState();
   }
 
@@ -268,27 +270,40 @@ export class ClaudeBridge {
               return { behavior: "allow" as const, updatedInput: input };
             }
 
+            // Check if user already approved this tool for the session
+            if (this.sessionApprovedTools.get(chatId)?.has(toolName)) {
+              logTool(`${toolName} (session-approved)`, toolDetail(toolName, input as Record<string, unknown>), this.tag);
+              return { behavior: "allow" as const, updatedInput: input };
+            }
+
             logTool(`${toolName} (awaiting approval)`, toolDetail(toolName, input as Record<string, unknown>), this.tag);
 
-            const approved = await Promise.race([
+            const result = await Promise.race([
               callbacks.onToolApproval(
                 toolName,
                 input as Record<string, unknown>
               ),
-              new Promise<boolean>((resolve) => {
+              new Promise<"deny">((resolve) => {
                 if (signal.aborted) {
-                  resolve(false);
+                  resolve("deny");
                   return;
                 }
-                signal.addEventListener("abort", () => resolve(false), {
+                signal.addEventListener("abort", () => resolve("deny"), {
                   once: true,
                 });
               }),
             ]);
 
-            logApproval(toolName, approved, this.tag);
+            if (result === "always") {
+              if (!this.sessionApprovedTools.has(chatId)) {
+                this.sessionApprovedTools.set(chatId, new Set());
+              }
+              this.sessionApprovedTools.get(chatId)!.add(toolName);
+            }
 
-            if (approved) {
+            logApproval(toolName, result, this.tag);
+
+            if (result === "allow" || result === "always") {
               return { behavior: "allow" as const, updatedInput: input };
             }
             return {
