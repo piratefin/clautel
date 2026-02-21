@@ -292,6 +292,9 @@ export class ClaudeBridge {
           ...(sessionId ? { resume: sessionId } : {}),
           abortController,
           canUseTool: async (toolName, input, { signal }) => {
+            // Stop thinking words — tool status is more informative
+            clearInterval(thinkingInterval);
+
             const inp = input as Record<string, unknown>;
             const detail = toolDetail(toolName, inp);
             const statusDetail = toolStatusDetail(toolName, inp) || undefined;

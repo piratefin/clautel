@@ -1,9 +1,14 @@
+import fs from "node:fs";
+import path from "node:path";
 import { Bot } from "grammy";
 import { ClaudeBridge } from "./claude.js";
 import { createManager } from "./manager.js";
 import { createWorker } from "./worker.js";
 import { loadBots, addBot, removeBot } from "./store.js";
 import type { BotConfig } from "./store.js";
+import { DATA_DIR } from "./config.js";
+
+const PID_FILE = path.join(DATA_DIR, "daemon.pid");
 
 const activeWorkers = new Map<number, { config: BotConfig; bot: Bot; bridge: ClaudeBridge }>();
 
@@ -64,7 +69,21 @@ function getActiveWorkers(): Map<number, { config: BotConfig }> {
 }
 
 async function main() {
+  // Write our own PID so the CLI can detect us even if launched via npm start
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(PID_FILE, String(process.pid));
+
   const managerBot = createManager({ startWorker, stopWorker, getActiveWorkers });
+
+  // Exit immediately if another instance is already polling this token
+  managerBot.catch((err) => {
+    if (err.message.includes("409: Conflict")) {
+      console.error("Another daemon is already running. Stop it first: claude-on-phone stop");
+      process.exit(1);
+    }
+    console.error("[manager] Error:", err.message);
+  });
+
   await managerBot.api.setMyCommands(MANAGER_COMMANDS);
 
   // Restore saved workers from previous session
@@ -94,6 +113,7 @@ const shutdown = async () => {
     try { await worker.bot.stop(); } catch {}
   }
   activeWorkers.clear();
+  fs.rmSync(PID_FILE, { force: true });
   process.exit(0);
 };
 
