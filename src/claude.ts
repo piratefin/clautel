@@ -71,24 +71,26 @@ const THINKING_WORDS = [
   "Deciphering...",
 ];
 
-function formatToolStatus(toolName: string): string {
-  const toolLabels: Record<string, string> = {
-    Read: "Reading file...",
-    Bash: "Running command...",
-    Edit: "Editing file...",
-    MultiEdit: "Editing file...",
-    Write: "Writing file...",
-    Glob: "Searching files...",
-    Grep: "Searching code...",
-    WebSearch: "Searching the web...",
-    WebFetch: "Fetching URL...",
-    Task: "Running agent...",
-    TodoWrite: "Updating tasks...",
-    NotebookEdit: "Editing notebook...",
+function formatToolStatus(toolName: string, detail?: string): string {
+  const toolVerbs: Record<string, string> = {
+    Read: "Reading",
+    Bash: "Running",
+    Edit: "Editing",
+    MultiEdit: "Editing",
+    Write: "Writing",
+    Glob: "Searching files",
+    Grep: "Searching code",
+    WebSearch: "Searching",
+    WebFetch: "Fetching",
+    Task: "Running agent",
+    TodoWrite: "Updating tasks",
+    NotebookEdit: "Editing notebook",
   };
-  return toolLabels[toolName] || `Using ${toolName}...`;
+  const verb = toolVerbs[toolName] || `Using ${toolName}`;
+  return detail ? `${verb}: ${detail}` : `${verb}...`;
 }
 
+// Full path/detail for terminal logs
 function toolDetail(toolName: string, input: Record<string, unknown>): string {
   switch (toolName) {
     case "Read":
@@ -101,6 +103,31 @@ function toolDetail(toolName: string, input: Record<string, unknown>): string {
       return String(input.pattern || "");
     case "Grep":
       return String(input.pattern || "");
+    default:
+      return "";
+  }
+}
+
+// Short detail for Telegram status (filename only, truncated commands)
+function toolStatusDetail(toolName: string, input: Record<string, unknown>): string {
+  switch (toolName) {
+    case "Read":
+    case "Write":
+    case "Edit":
+    case "MultiEdit":
+      return path.basename(String(input.file_path || ""));
+    case "NotebookEdit":
+      return path.basename(String(input.notebook_path || ""));
+    case "Bash":
+      return String(input.command || "").slice(0, 60);
+    case "Glob":
+      return String(input.pattern || "");
+    case "Grep":
+      return `"${String(input.pattern || "").slice(0, 40)}"`;
+    case "WebSearch":
+      return `"${String(input.query || "").slice(0, 40)}"`;
+    case "WebFetch":
+      return String(input.url || "").slice(0, 50);
     default:
       return "";
   }
@@ -265,24 +292,28 @@ export class ClaudeBridge {
           ...(sessionId ? { resume: sessionId } : {}),
           abortController,
           canUseTool: async (toolName, input, { signal }) => {
+            const inp = input as Record<string, unknown>;
+            const detail = toolDetail(toolName, inp);
+            const statusDetail = toolStatusDetail(toolName, inp) || undefined;
+
             if (AUTO_APPROVE_TOOLS.includes(toolName)) {
-              logTool(toolName, toolDetail(toolName, input as Record<string, unknown>), this.tag);
+              logTool(toolName, detail, this.tag);
+              callbacks.onStatusUpdate(formatToolStatus(toolName, statusDetail));
               return { behavior: "allow" as const, updatedInput: input };
             }
 
             // Check if user already approved this tool for the session
             if (this.sessionApprovedTools.get(chatId)?.has(toolName)) {
-              logTool(`${toolName} (session-approved)`, toolDetail(toolName, input as Record<string, unknown>), this.tag);
+              logTool(`${toolName} (session-approved)`, detail, this.tag);
+              callbacks.onStatusUpdate(formatToolStatus(toolName, statusDetail));
               return { behavior: "allow" as const, updatedInput: input };
             }
 
-            logTool(`${toolName} (awaiting approval)`, toolDetail(toolName, input as Record<string, unknown>), this.tag);
+            logTool(`${toolName} (awaiting approval)`, detail, this.tag);
+            callbacks.onStatusUpdate("Waiting for approval...");
 
             const result = await Promise.race([
-              callbacks.onToolApproval(
-                toolName,
-                input as Record<string, unknown>
-              ),
+              callbacks.onToolApproval(toolName, inp),
               new Promise<"deny">((resolve) => {
                 if (signal.aborted) {
                   resolve("deny");

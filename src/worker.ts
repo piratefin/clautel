@@ -256,12 +256,15 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
         });
       };
 
+      let responseHandled = false;
+
       const onResult = async (result: {
         text: string;
         usage: { inputTokens: number; outputTokens: number; cacheCreationTokens: number; cacheReadTokens: number };
         turns: number;
         durationMs: number;
       }) => {
+        responseHandled = true;
         clearInterval(typingInterval);
         if (editTimer) clearTimeout(editTimer);
 
@@ -304,6 +307,7 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
       };
 
       const onError = async (error: Error) => {
+        responseHandled = true;
         clearInterval(typingInterval);
         if (editTimer) clearTimeout(editTimer);
         logError(error.message, tag);
@@ -332,6 +336,17 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
         onResult,
         onError,
       });
+
+      // Runs if cancelled (onResult/onError were never called)
+      if (!responseHandled) {
+        clearInterval(typingInterval);
+        if (editTimer) clearTimeout(editTimer);
+        try {
+          await bot.api.deleteMessage(chatId, thinkingMsgId);
+        } catch {
+          await bot.api.editMessageText(chatId, thinkingMsgId, "Cancelled.").catch(() => {});
+        }
+      }
     })().catch((err) => {
       console.error(`[${tag}] handlePrompt error:`, err);
     });
