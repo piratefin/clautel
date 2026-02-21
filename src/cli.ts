@@ -11,8 +11,14 @@ const PID_FILE = path.join(DATA_DIR, "daemon.pid");
 const LOG_FILE = path.join(DATA_DIR, "app.log");
 const CONFIG_FILE = path.join(DATA_DIR, "config.json");
 
-// Path to daemon script — sibling of this file in dist/
-const DAEMON_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "daemon.js");
+// Resolve daemon path: prefer compiled dist/daemon.js, fall back to tsx for local dev
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const compiledDaemon = path.join(__dirname, "daemon.js");
+const srcDaemon = path.join(__dirname, "../src/daemon.ts");
+
+const DAEMON_CMD: [string, string[]] = fs.existsSync(compiledDaemon)
+  ? [process.execPath, [compiledDaemon]]
+  : ["npx", ["tsx", srcDaemon]];
 
 function isRunning(pid: number): boolean {
   try {
@@ -84,7 +90,8 @@ function cmdStart(): void {
 
   const logFd = fs.openSync(LOG_FILE, "a");
 
-  const child = spawn(process.execPath, [DAEMON_PATH], {
+  const [cmd, args] = DAEMON_CMD;
+  const child = spawn(cmd, args, {
     detached: true,
     stdio: ["ignore", logFd, logFd],
   });

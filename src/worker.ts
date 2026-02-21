@@ -366,7 +366,7 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
     const fileName = doc.file_name || `file-${Date.now()}`;
     const tmpFile = path.join(tmpDir, fileName);
 
-    const res = await fetch(fileUrl);
+    const res = await fetch(fileUrl, { signal: AbortSignal.timeout(30_000) });
     const arrayBuf = Buffer.from(await res.arrayBuffer());
     fs.writeFileSync(tmpFile, arrayBuf);
 
@@ -396,7 +396,7 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
     const ext = path.extname(file.file_path || ".jpg") || ".jpg";
     const tmpFile = path.join(tmpDir, `tg-${Date.now()}${ext}`);
 
-    const res = await fetch(fileUrl);
+    const res = await fetch(fileUrl, { signal: AbortSignal.timeout(30_000) });
     const arrayBuf = Buffer.from(await res.arrayBuffer());
     fs.writeFileSync(tmpFile, arrayBuf);
 

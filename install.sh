@@ -2,7 +2,7 @@
 set -e
 
 # Claude on Phone — installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/YOUR_USER/claude-on-phone/main/install.sh | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/AnasNadeem/claude-on-phone/main/install.sh | sh
 
 REQUIRED_NODE_MAJOR=18
 

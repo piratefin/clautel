@@ -19,6 +19,13 @@
     "cli": "tsx src/cli.ts",
     "prepublishOnly": "npm run build"
   },
+  "author": "Anas Nadeem",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AnasNadeem/claude-on-phone.git"
+  },
+  "homepage": "https://github.com/AnasNadeem/claude-on-phone",
   "keywords": [
     "claude",
     "anthropic",
