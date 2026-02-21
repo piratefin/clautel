@@ -17,7 +17,7 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
 
   const pendingApprovals = new Map<
     string,
-    { resolve: (result: "allow" | "always" | "deny") => void; timer: NodeJS.Timeout }
+    { resolve: (result: "allow" | "always" | "deny") => void; timer: NodeJS.Timeout; description: string }
   >();
   let approvalCounter = 0;
   let retryCounter = 0;
@@ -234,7 +234,7 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
             resolve("deny");
           }, 5 * 60 * 1000);
 
-          pendingApprovals.set(requestId, { resolve, timer });
+          pendingApprovals.set(requestId, { resolve, timer, description });
 
           const description = formatToolCall(toolName, input);
           const keyboard = new InlineKeyboard()
@@ -492,8 +492,9 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
                             "DENIED";
 
     try {
-      const originalText = ctx.callbackQuery.message?.text || "";
-      await ctx.editMessageText(`[${statusLabel}]\n${originalText}`);
+      await ctx.editMessageText(`[${statusLabel}]\n${pending.description}`, {
+        parse_mode: "HTML",
+      });
     } catch {}
 
     const answerText =
