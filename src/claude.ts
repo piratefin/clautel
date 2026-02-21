@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { query } from "@anthropic-ai/claude-code";
 import { config } from "./config.js";
@@ -243,9 +244,13 @@ export class ClaudeBridge {
     this.activeAborts.clear();
   }
 
+  getTempDir(): string {
+    return path.join(os.tmpdir(), `claude-on-phone-${this.botId}`);
+  }
+
   cleanupTempFiles(): void {
     try {
-      const tmpDir = path.join(this.workingDir, ".tmp-images");
+      const tmpDir = this.getTempDir();
       if (fs.existsSync(tmpDir)) {
         const files = fs.readdirSync(tmpDir);
         for (const f of files) {

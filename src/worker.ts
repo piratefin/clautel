@@ -378,7 +378,7 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
     const file = await ctx.api.getFile(doc.file_id);
     const fileUrl = `https://api.telegram.org/file/bot${botConfig.token}/${file.file_path}`;
 
-    const tmpDir = path.join(bridge.workingDir, ".tmp-images");
+    const tmpDir = bridge.getTempDir();
     fs.mkdirSync(tmpDir, { recursive: true });
     const fileName = doc.file_name || `file-${Date.now()}`;
     const tmpFile = path.join(tmpDir, fileName);
@@ -408,7 +408,7 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
     const file = await ctx.api.getFile(photo.file_id);
     const fileUrl = `https://api.telegram.org/file/bot${botConfig.token}/${file.file_path}`;
 
-    const tmpDir = path.join(bridge.workingDir, ".tmp-images");
+    const tmpDir = bridge.getTempDir();
     fs.mkdirSync(tmpDir, { recursive: true });
     const ext = path.extname(file.file_path || ".jpg") || ".jpg";
     const tmpFile = path.join(tmpDir, `tg-${Date.now()}${ext}`);
