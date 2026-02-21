@@ -15,6 +15,7 @@ const TYPING_INTERVAL_MS = 4000;
 const EDIT_DEBOUNCE_MS = 1500;
 const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 30_000;
+const MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024; // 20 MB
 const REPLY_PREVIEW_MAX = 500;
 const STREAM_MAX_LEN = 4000;
 
@@ -382,6 +383,11 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
     }
 
     const doc = ctx.message.document;
+    if (doc.file_size && doc.file_size > MAX_DOWNLOAD_BYTES) {
+      await ctx.reply(`File too large (${(doc.file_size / 1024 / 1024).toFixed(1)} MB). Max is ${MAX_DOWNLOAD_BYTES / 1024 / 1024} MB.`);
+      return;
+    }
+
     const file = await ctx.api.getFile(doc.file_id);
     const fileUrl = `https://api.telegram.org/file/bot${botConfig.token}/${file.file_path}`;
 
@@ -391,6 +397,11 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
     const tmpFile = path.join(tmpDir, fileName);
 
     const res = await fetch(fileUrl, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    const contentLength = Number(res.headers.get("content-length") || 0);
+    if (contentLength > MAX_DOWNLOAD_BYTES) {
+      await ctx.reply(`File too large (${(contentLength / 1024 / 1024).toFixed(1)} MB). Max is ${MAX_DOWNLOAD_BYTES / 1024 / 1024} MB.`);
+      return;
+    }
     const arrayBuf = Buffer.from(await res.arrayBuffer());
     fs.writeFileSync(tmpFile, arrayBuf);
 
@@ -412,6 +423,11 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
 
     const photos = ctx.message.photo;
     const photo = photos[photos.length - 1];
+    if (photo.file_size && photo.file_size > MAX_DOWNLOAD_BYTES) {
+      await ctx.reply(`Photo too large (${(photo.file_size / 1024 / 1024).toFixed(1)} MB). Max is ${MAX_DOWNLOAD_BYTES / 1024 / 1024} MB.`);
+      return;
+    }
+
     const file = await ctx.api.getFile(photo.file_id);
     const fileUrl = `https://api.telegram.org/file/bot${botConfig.token}/${file.file_path}`;
 
@@ -421,6 +437,11 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
     const tmpFile = path.join(tmpDir, `tg-${Date.now()}${ext}`);
 
     const res = await fetch(fileUrl, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    const contentLength = Number(res.headers.get("content-length") || 0);
+    if (contentLength > MAX_DOWNLOAD_BYTES) {
+      await ctx.reply(`Photo too large (${(contentLength / 1024 / 1024).toFixed(1)} MB). Max is ${MAX_DOWNLOAD_BYTES / 1024 / 1024} MB.`);
+      return;
+    }
     const arrayBuf = Buffer.from(await res.arrayBuffer());
     fs.writeFileSync(tmpFile, arrayBuf);
 
