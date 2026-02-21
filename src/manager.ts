@@ -7,7 +7,6 @@ export interface ManagerCallbacks {
   startWorker: (botConfig: BotConfig) => Promise<void>;
   stopWorker: (botId: number) => Promise<void>;
   getActiveWorkers: () => Map<number, { config: BotConfig }>;
-  getTunnelUrl: () => string;
 }
 
 interface ConversationState {
