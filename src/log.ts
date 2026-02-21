@@ -17,26 +17,41 @@ function prefix(tag?: string): string {
   return tag ? `${DIM}[${tag}]${RESET} ` : "";
 }
 
+function jsonLog(level: string, message: string, extra?: Record<string, unknown>) {
+  const entry = {
+    ts: new Date().toISOString(),
+    level,
+    message,
+    ...extra,
+  };
+  console.log(JSON.stringify(entry));
+}
+
 export function logUser(text: string, tag?: string) {
+  if (!isTTY) { jsonLog("info", text, { type: "user", bot: tag }); return; }
   const preview = text.length > 200 ? text.slice(0, 200) + "..." : text;
   console.log(`${ts()} ${prefix(tag)}${BOLD}${CYAN}YOU${RESET}  ${preview}`);
 }
 
 export function logStatus(status: string, tag?: string) {
+  if (!isTTY) { jsonLog("debug", status, { type: "status", bot: tag }); return; }
   console.log(`${ts()} ${prefix(tag)}${DIM}${MAGENTA}...${RESET}  ${DIM}${status}${RESET}`);
 }
 
 export function logStream(text: string, tag?: string) {
+  if (!isTTY) { jsonLog("info", text, { type: "response", bot: tag }); return; }
   const preview = text.length > 300 ? text.slice(0, 300) + "..." : text;
   console.log(`${ts()} ${prefix(tag)}${GREEN}Claude${RESET}  ${preview}`);
 }
 
 export function logTool(toolName: string, detail?: string, tag?: string) {
+  if (!isTTY) { jsonLog("info", toolName, { type: "tool", detail, bot: tag }); return; }
   const suffix = detail ? ` ${DIM}${detail}${RESET}` : "";
   console.log(`${ts()} ${prefix(tag)}${YELLOW}TOOL${RESET}  ${toolName}${suffix}`);
 }
 
 export function logApproval(toolName: string, result: "allow" | "always" | "deny", tag?: string) {
+  if (!isTTY) { jsonLog("info", toolName, { type: "approval", result, bot: tag }); return; }
   const label =
     result === "allow"  ? `${GREEN}APPROVED${RESET}` :
     result === "always" ? `${GREEN}ALWAYS${RESET}  ` :
@@ -45,9 +60,11 @@ export function logApproval(toolName: string, result: "allow" | "always" | "deny
 }
 
 export function logResult(tokens: number, turns: number, seconds: string, tag?: string) {
+  if (!isTTY) { jsonLog("info", "query complete", { type: "result", tokens, turns, seconds, bot: tag }); return; }
   console.log(`${ts()} ${prefix(tag)}${DIM}DONE${RESET}  ${tokens.toLocaleString()} tokens | ${turns} turns | ${seconds}s`);
 }
 
 export function logError(message: string, tag?: string) {
+  if (!isTTY) { jsonLog("error", message, { type: "error", bot: tag }); return; }
   console.log(`${ts()} ${prefix(tag)}${RED}ERROR${RESET}  ${message}`);
 }
