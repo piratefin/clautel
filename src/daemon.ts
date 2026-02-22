@@ -18,12 +18,13 @@ let healthCheckTimer: NodeJS.Timeout | null = null;
 let licenseTimer: NodeJS.Timeout | null = null;
 
 const WORKER_COMMANDS = [
-  { command: "new",     description: "Start a fresh session" },
-  { command: "model",   description: "Switch Claude model (Opus / Sonnet / Haiku)" },
-  { command: "cost",    description: "Show token usage for this session" },
-  { command: "session", description: "Get session ID to resume in CLI" },
-  { command: "cancel",  description: "Abort the current operation" },
-  { command: "help",    description: "Show help" },
+  { command: "new",      description: "Start a fresh session" },
+  { command: "model",    description: "Switch Claude model (Opus / Sonnet / Haiku)" },
+  { command: "cost",     description: "Show token usage for this session" },
+  { command: "session",  description: "Get session ID to resume in CLI" },
+  { command: "cancel",   description: "Abort the current operation" },
+  { command: "feedback", description: "Send feedback or report an issue" },
+  { command: "help",     description: "Show help" },
 ];
 
 const MANAGER_COMMANDS = [
@@ -32,6 +33,7 @@ const MANAGER_COMMANDS = [
   { command: "remove",       description: "Remove a worker bot" },
   { command: "subscribe",    description: "Get a license or upgrade" },
   { command: "subscription", description: "View license, billing & cancel" },
+  { command: "feedback",     description: "Send feedback or report an issue" },
   { command: "cancel",       description: "Cancel current operation" },
   { command: "help",         description: "Show help" },
 ];

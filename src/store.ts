@@ -43,3 +43,4 @@ export function removeBot(botId: number): void {
 export function getBots(): BotConfig[] {
   return loadBots();
 }
+

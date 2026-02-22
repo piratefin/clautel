@@ -17,6 +17,7 @@ interface ConversationState {
 }
 
 const CONVERSATION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+const FEEDBACK_FORM_URL = "https://forms.gle/REPLACE_WITH_YOUR_FORM_ID";
 
 export function createManager(callbacks: ManagerCallbacks): Bot {
   const bot = new Bot(config.TELEGRAM_BOT_TOKEN);
@@ -75,6 +76,7 @@ export function createManager(callbacks: ManagerCallbacks): Bot {
     "/remove @username — Remove a worker bot\n" +
     "/subscribe — Get a license or upgrade your plan\n" +
     "/subscription — View license status, billing &amp; cancellation\n" +
+    "/feedback — Send feedback or report an issue\n" +
     "/cancel — Cancel current operation\n" +
     "/help — Show this help message\n\n" +
     "<b>How to add a bot:</b>\n" +
@@ -129,6 +131,14 @@ export function createManager(callbacks: ManagerCallbacks): Bot {
     } else {
       await ctx.reply("Nothing to cancel.");
     }
+  });
+
+  bot.command("feedback", async (ctx) => {
+    await ctx.reply(
+      "We'd love to hear from you!\n\n" +
+        `<a href="${FEEDBACK_FORM_URL}">Open feedback form</a>`,
+      { parse_mode: "HTML" }
+    );
   });
 
   bot.command("add", async (ctx) => {

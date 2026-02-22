@@ -21,6 +21,7 @@ const FETCH_TIMEOUT_MS = 30_000;
 const MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024; // 20 MB
 const REPLY_PREVIEW_MAX = 500;
 const STREAM_MAX_LEN = 4000;
+const FEEDBACK_FORM_URL = "https://forms.gle/REPLACE_WITH_YOUR_FORM_ID";
 
 export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
   const bot = new Bot(botConfig.token);
@@ -66,6 +67,7 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
     "/cost — Show token usage for the current session\n" +
     "/session — Get session ID to continue in CLI\n" +
     "/cancel — Abort the current operation\n" +
+    "/feedback — Send feedback or report an issue\n" +
     "/help — Show this help message\n\n" +
     "<b>Features:</b>\n" +
     "• Send documents (PDF, code files, etc.) for analysis\n" +
@@ -146,6 +148,14 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
         `Run this from <code>${botConfig.workingDir}</code>:\n\n` +
         `<code>${cmd}</code>\n\n` +
         `Tap the command above to copy it.`,
+      { parse_mode: "HTML" }
+    );
+  });
+
+  bot.command("feedback", async (ctx) => {
+    await ctx.reply(
+      "We'd love to hear from you!\n\n" +
+        `<a href="${FEEDBACK_FORM_URL}">Open feedback form</a>`,
       { parse_mode: "HTML" }
     );
   });
