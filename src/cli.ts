@@ -124,20 +124,25 @@ async function cmdSetup(): Promise<void> {
   );
 
   // Step 3/3: License
-  const { getPaymentUrl, activateLicense } = await import("./license.js");
+  const { getPaymentUrl, activateLicense, detectClaudePlan, getPlanLabel } = await import("./license.js");
+
+  const { tier } = detectClaudePlan();
+  const planLabel = getPlanLabel(tier);
 
   console.log("Step 3/3: License");
-  console.log(`  Get a license at: ${getPaymentUrl()}`);
+  console.log(`  Detected Claude plan: ${tier === "max" ? "Max (Opus default)" : "Pro (Sonnet default)"}`);
+  console.log(`  Your price: ${planLabel}`);
+  console.log(`  Get a license at: ${getPaymentUrl(tier)}`);
   console.log("  Paste your license key below.\n");
 
   while (true) {
     const licenseKeyInput = (await ask("  License key: ")).trim();
     if (!licenseKeyInput) {
-      console.log(`  A license key is required. Get one at: ${getPaymentUrl()}\n`);
+      console.log(`  A license key is required. Get one at: ${getPaymentUrl(tier)}\n`);
       continue;
     }
     console.log("  Activating license...");
-    const result = await activateLicense(licenseKeyInput, ownerId);
+    const result = await activateLicense(licenseKeyInput, ownerId, tier);
     if (result.success) {
       console.log("  License activated successfully!\n");
       break;
@@ -342,7 +347,27 @@ function cmdUninstallService(): void {
 async function cmdActivate(): Promise<void> {
   const key = process.argv[3];
   if (!key) {
-    console.error("Usage: claude-on-phone activate <license-key>");
+    console.error("Usage: claude-on-phone activate <license-key> [--plan pro|max]");
+    process.exit(1);
+  }
+
+  // Parse optional --plan flag
+  const { activateLicense, detectClaudePlan, getPlanLabel, isUnderLicensed, getPaymentUrl } = await import("./license.js");
+
+  let planArg: "pro" | "max" | undefined;
+  const planIdx = process.argv.indexOf("--plan");
+  if (planIdx !== -1 && process.argv[planIdx + 1]) {
+    const val = process.argv[planIdx + 1];
+    if (val === "pro" || val === "max") planArg = val;
+  }
+
+  const { tier: detectedTier } = detectClaudePlan();
+  const plan = planArg ?? detectedTier;
+
+  // Enforce: can't use a plan lower than detected Claude plan
+  if (isUnderLicensed(plan, detectedTier)) {
+    console.error(`Your Claude plan is ${getPlanLabel(detectedTier)} — you cannot use a ${getPlanLabel(plan)} license.`);
+    console.error(`Get a ${getPlanLabel(detectedTier)} license at: ${getPaymentUrl(detectedTier)}`);
     process.exit(1);
   }
 
@@ -358,9 +383,9 @@ async function cmdActivate(): Promise<void> {
     console.warn("License will be activated without owner ID binding.");
   }
 
-  const { activateLicense } = await import("./license.js");
+  console.log(`Detected plan: ${getPlanLabel(plan)}`);
   console.log("Activating license...");
-  const result = await activateLicense(key, ownerId);
+  const result = await activateLicense(key, ownerId, plan);
   if (result.success) {
     console.log("License activated successfully!");
     console.log("Restart the daemon to apply: claude-on-phone stop && claude-on-phone start");
