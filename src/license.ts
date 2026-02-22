@@ -15,6 +15,7 @@ const DODO_BASE_URL_LIVE = "https://live.dodopayments.com";
 const DODO_BASE_URL_TEST = "https://test.dodopayments.com";
 const PAYMENT_PRODUCT_LIVE = "pdt_Y3kYZzaXSo6v7Y0zYhLjb";
 const PAYMENT_PRODUCT_TEST = "pdt_0NZ2YnOMRtUJA9x7yFwXS";
+const SUCCESS_PAGE_URL = "https://whoareyouanas.com/claude-on-phone/success";
 
 const LICENSE_FILE = path.join(DATA_DIR, "license.json");
 const FLUSH_DEBOUNCE_MS = 5000; // 5 seconds
@@ -55,7 +56,8 @@ export function getPaymentUrl(): string {
   const isTest = process.env.DODO_ENV === "test";
   const base = isTest ? DODO_CHECKOUT_URL_TEST : DODO_CHECKOUT_URL_LIVE;
   const product = isTest ? PAYMENT_PRODUCT_TEST : PAYMENT_PRODUCT_LIVE;
-  return `${base}/buy/${product}?quantity=1`;
+  const redirect = encodeURIComponent(SUCCESS_PAGE_URL);
+  return `${base}/buy/${product}?quantity=1&redirect_url=${redirect}`;
 }
 
 export function getCustomerPortalUrl(): string {
@@ -185,10 +187,10 @@ export async function activateLicense(
     });
 
     if (res.status === 200 || res.status === 201) {
-      const data = (await res.json()) as { instance_id: string };
+      const data = (await res.json()) as { id: string };
       const state = loadLicense();
       state.licenseKey = key;
-      state.instanceId = data.instance_id;
+      state.instanceId = data.id;
       state.status = "active";
       state.lastValidatedAt = new Date().toISOString();
       state.lastValidationResult = true;
@@ -196,7 +198,7 @@ export async function activateLicense(
       state.warningsSent = 0;
       saveLicense(state); // immediate disk write
       invalidateCache();
-      return { success: true, instanceId: data.instance_id };
+      return { success: true, instanceId: data.id };
     }
 
     const body = await res.text();
