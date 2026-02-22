@@ -8,7 +8,9 @@ import {
   claudeToTelegram,
   splitMessage,
   formatToolCall,
+  escapeHtml,
 } from "./formatter.js";
+import type { AskUserQuestion } from "./claude.js";
 import { logUser, logStream, logResult, logError } from "./log.js";
 import { checkLicenseForQuery, getPaymentUrl } from "./license.js";
 
@@ -27,6 +29,14 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
   const pendingApprovals = new Map<
     string,
     { resolve: (result: "allow" | "always" | "deny") => void; timer: NodeJS.Timeout; description: string }
+  >();
+  const pendingPlanActions = new Map<
+    string,
+    { resolve: (approved: boolean) => void; timer: NodeJS.Timeout }
+  >();
+  const pendingAnswers = new Map<
+    string,
+    { resolve: (answer: string) => void; timer: NodeJS.Timeout; options: Array<{ label: string }>; question: string }
   >();
   let approvalCounter = 0;
   let retryCounter = 0;
@@ -241,6 +251,93 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
         scheduleEdit();
       };
 
+      const onPlanApproval = async (): Promise<boolean> => {
+        // Send the accumulated plan text as separate messages so user can review
+        if (buffer.trim()) {
+          const html = claudeToTelegram(buffer);
+          const parts = splitMessage(html);
+          for (const part of parts) {
+            try {
+              await bot.api.sendMessage(chatId, part, { parse_mode: "HTML" });
+            } catch {
+              await bot.api.sendMessage(chatId, part).catch(() => {});
+            }
+          }
+        }
+
+        // Reset buffer so implementation phase streams cleanly
+        buffer = "";
+        currentActivity = "Waiting for plan approval...";
+        scheduleEdit();
+
+        const requestId = String(++approvalCounter);
+        const keyboard = new InlineKeyboard()
+          .text("Approve Plan", `plan:approve:${requestId}`)
+          .row()
+          .text("Reject Plan", `plan:reject:${requestId}`);
+
+        return new Promise((resolve) => {
+          const timer = setTimeout(() => {
+            pendingPlanActions.delete(requestId);
+            resolve(false);
+          }, APPROVAL_TIMEOUT_MS);
+
+          pendingPlanActions.set(requestId, { resolve, timer });
+
+          bot.api
+            .sendMessage(chatId, "<b>Approve this plan?</b>", {
+              parse_mode: "HTML",
+              reply_markup: keyboard,
+            })
+            .catch(() => {
+              clearTimeout(timer);
+              pendingPlanActions.delete(requestId);
+              resolve(false);
+            });
+        });
+      };
+
+      const onAskUser = async (questions: AskUserQuestion[]): Promise<Record<string, string>> => {
+        const answers: Record<string, string> = {};
+
+        for (let i = 0; i < questions.length; i++) {
+          const q = questions[i];
+          const requestId = String(++approvalCounter);
+
+          const keyboard = new InlineKeyboard();
+          q.options.forEach((opt, optIdx) => {
+            keyboard.text(opt.label, `answer:${requestId}:${optIdx}`);
+            if (optIdx < q.options.length - 1) keyboard.row();
+          });
+
+          const answer = await new Promise<string>((resolve) => {
+            const timer = setTimeout(() => {
+              pendingAnswers.delete(requestId);
+              resolve(q.options[0]?.label || "");
+            }, APPROVAL_TIMEOUT_MS);
+
+            pendingAnswers.set(requestId, { resolve, timer, options: q.options, question: q.question });
+
+            const desc = q.options.map((o) => `• <b>${escapeHtml(o.label)}</b> — ${escapeHtml(o.description)}`).join("\n");
+            bot.api
+              .sendMessage(
+                chatId,
+                `<b>${escapeHtml(q.header)}</b>\n${escapeHtml(q.question)}\n\n${desc}`,
+                { parse_mode: "HTML", reply_markup: keyboard }
+              )
+              .catch(() => {
+                clearTimeout(timer);
+                pendingAnswers.delete(requestId);
+                resolve(q.options[0]?.label || "");
+              });
+          });
+
+          answers[String(i)] = answer;
+        }
+
+        return answers;
+      };
+
       const onToolApproval = (
         toolName: string,
         input: Record<string, unknown>
@@ -287,7 +384,7 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
         clearInterval(typingInterval);
         if (editTimer) clearTimeout(editTimer);
 
-        const finalText = result.text || buffer || "Done.";
+        const finalText = buffer || result.text || "Done.";
 
         logStream(finalText, tag);
 
@@ -352,6 +449,8 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
         onStreamChunk,
         onStatusUpdate,
         onToolApproval,
+        onAskUser,
+        onPlanApproval,
         onResult,
         onError,
       });
@@ -483,6 +582,52 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
         { parse_mode: "HTML" }
       ).catch(() => {});
       await ctx.answerCallbackQuery(`Switched to ${label}`).catch(() => {});
+      return;
+    }
+
+    // Plan approval
+    if (data.startsWith("plan:")) {
+      const parts = data.split(":");
+      const action = parts[1];
+      const requestId = parts[2];
+      const pending = pendingPlanActions.get(requestId);
+      if (!pending) {
+        await ctx.answerCallbackQuery("Request expired").catch(() => {});
+        return;
+      }
+      clearTimeout(pending.timer);
+      pendingPlanActions.delete(requestId);
+
+      const approved = action === "approve";
+      pending.resolve(approved);
+
+      await ctx.editMessageText(approved ? "Plan approved." : "Plan rejected.").catch(() => {});
+      await ctx.answerCallbackQuery(approved ? "Plan approved" : "Plan rejected").catch(() => {});
+      return;
+    }
+
+    // Question answer
+    if (data.startsWith("answer:")) {
+      const parts = data.split(":");
+      const requestId = parts[1];
+      const optIdx = Number(parts[2]);
+      const pending = pendingAnswers.get(requestId);
+      if (!pending) {
+        await ctx.answerCallbackQuery("Request expired").catch(() => {});
+        return;
+      }
+      clearTimeout(pending.timer);
+      pendingAnswers.delete(requestId);
+
+      const selectedLabel = pending.options[optIdx]?.label || "";
+      pending.resolve(selectedLabel);
+
+      await ctx
+        .editMessageText(`<b>${escapeHtml(pending.question)}</b>\n\nSelected: <b>${escapeHtml(selectedLabel)}</b>`, {
+          parse_mode: "HTML",
+        })
+        .catch(() => {});
+      await ctx.answerCallbackQuery(`Selected: ${selectedLabel}`).catch(() => {});
       return;
     }
 

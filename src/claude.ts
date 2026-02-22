@@ -23,8 +23,6 @@ const AUTO_APPROVE_TOOLS = [
   "TaskOutput",
   "TaskStop",
   "EnterPlanMode",
-  "ExitPlanMode",
-  "AskUserQuestion",
 ];
 
 export interface TokenUsage {
@@ -34,6 +32,13 @@ export interface TokenUsage {
   cacheReadTokens: number;
 }
 
+export interface AskUserQuestion {
+  question: string;
+  header: string;
+  options: Array<{ label: string; description: string }>;
+  multiSelect: boolean;
+}
+
 export interface SendCallbacks {
   onStreamChunk: (text: string) => void;
   onStatusUpdate: (status: string) => void;
@@ -41,6 +46,8 @@ export interface SendCallbacks {
     toolName: string,
     input: Record<string, unknown>
   ) => Promise<"allow" | "always" | "deny">;
+  onAskUser: (questions: AskUserQuestion[]) => Promise<Record<string, string>>;
+  onPlanApproval: () => Promise<boolean>;
   onResult: (result: {
     text: string;
     usage: TokenUsage;
@@ -90,6 +97,8 @@ function formatToolStatus(toolName: string, detail?: string): string {
     Task: "Running agent",
     TodoWrite: "Updating tasks",
     NotebookEdit: "Editing notebook",
+    EnterPlanMode: "Planning",
+    ExitPlanMode: "Finalizing plan",
   };
   const verb = toolVerbs[toolName] || `Using ${toolName}`;
   return detail ? `${verb}: ${detail}` : `${verb}...`;
@@ -310,6 +319,42 @@ export class ClaudeBridge {
             const inp = input as Record<string, unknown>;
             const detail = toolDetail(toolName, inp);
             const statusDetail = toolStatusDetail(toolName, inp) || undefined;
+
+            // Interactive: relay questions to user and collect answers
+            if (toolName === "AskUserQuestion") {
+              logTool(toolName, "", this.tag);
+              callbacks.onStatusUpdate("Asking user...");
+              try {
+                const questions = (inp.questions || []) as AskUserQuestion[];
+                const answers = await Promise.race([
+                  callbacks.onAskUser(questions),
+                  new Promise<Record<string, string>>((_, reject) => {
+                    if (signal.aborted) { reject(new Error("aborted")); return; }
+                    signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+                  }),
+                ]);
+                return { behavior: "allow" as const, updatedInput: { ...inp, answers } };
+              } catch {
+                return { behavior: "deny" as const, message: "User did not answer (cancelled or timed out)" };
+              }
+            }
+
+            // Interactive: show plan and get approval before proceeding
+            if (toolName === "ExitPlanMode") {
+              logTool(toolName, "", this.tag);
+              callbacks.onStatusUpdate("Waiting for plan approval...");
+              const approved = await Promise.race([
+                callbacks.onPlanApproval(),
+                new Promise<boolean>((resolve) => {
+                  if (signal.aborted) { resolve(false); return; }
+                  signal.addEventListener("abort", () => resolve(false), { once: true });
+                }),
+              ]);
+              if (approved) {
+                return { behavior: "allow" as const, updatedInput: input };
+              }
+              return { behavior: "deny" as const, message: "User rejected the plan via Telegram" };
+            }
 
             if (AUTO_APPROVE_TOOLS.includes(toolName)) {
               logTool(toolName, detail, this.tag);
