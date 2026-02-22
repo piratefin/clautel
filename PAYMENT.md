@@ -5,10 +5,20 @@ claude-on-phone uses [DodoPayments](https://dodopayments.com) for license key ma
 ## How It Works
 
 ```
-Purchase on checkout page → receive license key via email
-→ claude-on-phone activate <key> → activates on Dodo (tied to machine)
-→ daemon validates on startup + every 4 hours
-→ every query checks license state locally
+User discovers checkout via:
+  • claude-on-phone setup (terminal prompt)
+  • /subscribe command in manager bot
+  • Trial warning messages in Telegram
+        ↓
+Purchase on Dodo checkout page → license key delivered via email
+        ↓
+claude-on-phone activate <key> → activates on Dodo (tied to machine)
+        ↓
+Daemon validates on startup + every 4 hours
+Every query checks license state locally
+        ↓
+Manage billing/cancel via:
+  • /subscription command in manager bot → links to Dodo customer portal
 ```
 
 ## Setup (Dodo Dashboard)
@@ -16,7 +26,8 @@ Purchase on checkout page → receive license key via email
 1. Create a subscription product "claude-on-phone" (monthly/annual)
 2. Enable license key delivery: `activation_limit=3`, expiry tied to subscription
 3. Create a payment link — update `PAYMENT_URL` in `src/license.ts`
-4. Configure license key delivery via email after payment
+4. Set up the customer portal — update `CUSTOMER_PORTAL_URL` in `src/license.ts`
+5. Configure license key delivery via email after payment
 
 ## Environment Variables
 
@@ -35,6 +46,13 @@ claude-on-phone license          # Show current license status
 ```
 
 During `claude-on-phone setup`, users are prompted for a license key. Pressing Enter starts a free trial.
+
+## Manager Bot Commands
+
+| Command | Description |
+|---------|-------------|
+| `/subscribe` | Shows checkout link to purchase or upgrade |
+| `/subscription` | Shows current license status + link to Dodo customer portal (payment history, invoices, cancellation) |
 
 ## Free Trial
 

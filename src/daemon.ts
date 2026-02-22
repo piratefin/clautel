@@ -27,11 +27,13 @@ const WORKER_COMMANDS = [
 ];
 
 const MANAGER_COMMANDS = [
-  { command: "bots",   description: "List active worker bots" },
-  { command: "add",    description: "Add a new worker bot" },
-  { command: "remove", description: "Remove a worker bot" },
-  { command: "cancel", description: "Cancel current operation" },
-  { command: "help",   description: "Show help" },
+  { command: "bots",         description: "List active worker bots" },
+  { command: "add",          description: "Add a new worker bot" },
+  { command: "remove",       description: "Remove a worker bot" },
+  { command: "subscribe",    description: "Get a license or upgrade" },
+  { command: "subscription", description: "View license, billing & cancel" },
+  { command: "cancel",       description: "Cancel current operation" },
+  { command: "help",         description: "Show help" },
 ];
 
 async function startWorker(botConfig: BotConfig): Promise<void> {

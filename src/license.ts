@@ -12,6 +12,7 @@ const VALIDATION_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
 const OFFLINE_GRACE_HOURS = 72;
 const GRACE_PERIOD_MS = 48 * 60 * 60 * 1000; // 48 hours
 export const PAYMENT_URL = "https://checkout.dodopayments.com/buy/pdt_Y3kYZzaXSo6v7Y0zYhLjb";
+export const CUSTOMER_PORTAL_URL = "https://live.dodopayments.com/portal";
 const DODO_BASE_URL_LIVE = "https://live.dodopayments.com";
 const DODO_BASE_URL_TEST = "https://test.dodopayments.com";
 
