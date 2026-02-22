@@ -58,25 +58,20 @@ Plan detection is automatic — claude-on-phone reads `~/.claude.json` to detect
 
 ## Proxy Setup (Cloudflare Worker)
 
-The proxy prevents clients from talking to Dodo directly and signs all responses with Ed25519.
+The proxy at `license.clautel.com` prevents clients from talking to Dodo directly and signs all responses with Ed25519.
 
 ```bash
-# 1. Generate keypair
-node scripts/keygen.mjs
-
-# 2. Deploy proxy
+# 1. Deploy proxy
 cd proxy && npm install && npx wrangler deploy
 
-# 3. Store private key as Cloudflare secret
+# 2. Store private key as Cloudflare secret
 cd proxy && npx wrangler secret put ED25519_PRIVATE_KEY_HEX
 
-# 4. Update src/license.ts with:
-#    - PROXY_BASE_URL (from wrangler deploy output)
-#    - ED25519_PUBLIC_KEY_HEX (from keygen output)
-
-# 5. Rebuild
+# 3. Rebuild client
 npm run build
 ```
+
+The Ed25519 public key and proxy URL (`https://license.clautel.com`) are already embedded in `src/license.ts`.
 
 ## CLI Commands
 

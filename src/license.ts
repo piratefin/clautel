@@ -11,13 +11,11 @@ const OFFLINE_GRACE_HOURS = 24;
 const GRACE_PERIOD_MS = 1 * 60 * 60 * 1000; // 1 hour
 const DODO_CHECKOUT_URL = "https://checkout.dodopayments.com";
 const DODO_BASE_URL = "https://live.dodopayments.com";
-const SUCCESS_PAGE_URL = "https://whoareyouanas.com/claude-on-phone/success";
+const SUCCESS_PAGE_URL = "https://clautel.com/success";
 
 // --- Server-Side Proxy (Ed25519 Signed Tokens) ---
-// IMPORTANT: Update PROXY_BASE_URL after deploying the Cloudflare Worker
-const PROXY_BASE_URL = "https://claude-on-phone-license.<YOUR-SUBDOMAIN>.workers.dev";
-// IMPORTANT: Replace with the public key hex from `node scripts/keygen.mjs`
-const ED25519_PUBLIC_KEY_HEX = "0000000000000000000000000000000000000000000000000000000000000000";
+const PROXY_BASE_URL = "https://license.clautel.com";
+const ED25519_PUBLIC_KEY_HEX = "69f4a24c0a6746e9d9db0d074d7f218da76776ffc2589195e1d23f70a3beceba";
 const SIGNED_TOKEN_FILE = path.join(DATA_DIR, "signed-token.json");
 const TOKEN_OFFLINE_MAX_MS = 24 * 60 * 60 * 1000; // 24 hours
 
@@ -345,10 +343,7 @@ async function validateFromCache(state: LicenseState): Promise<"valid" | "invali
 }
 
 function isProxyConfigured(): boolean {
-  return (
-    PROXY_BASE_URL !== "https://claude-on-phone-license.<YOUR-SUBDOMAIN>.workers.dev" &&
-    ED25519_PUBLIC_KEY_HEX !== "0000000000000000000000000000000000000000000000000000000000000000"
-  );
+  return PROXY_BASE_URL.length > 0 && ED25519_PUBLIC_KEY_HEX.length === 64;
 }
 
 // --- Dodo API ---
