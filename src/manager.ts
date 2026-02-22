@@ -17,7 +17,7 @@ interface ConversationState {
 }
 
 const CONVERSATION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
-const FEEDBACK_FORM_URL = "https://forms.gle/REPLACE_WITH_YOUR_FORM_ID";
+const FEEDBACK_FORM_URL = "https://forms.gle/5r3j1uqK4YP7KWSA9";
 
 export function createManager(callbacks: ManagerCallbacks): Bot {
   const bot = new Bot(config.TELEGRAM_BOT_TOKEN);
