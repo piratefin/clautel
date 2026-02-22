@@ -66,26 +66,56 @@ async function cmdSetup(): Promise<void> {
     new Promise((resolve) => rl.question(q, resolve));
 
   console.log("Claude on Phone — Setup\n");
-  console.log("You'll need:");
-  console.log("  • A bot token from @BotFather (this will be your manager bot)");
-  console.log("  • Your Telegram user ID (get it from @userinfobot)\n");
 
-  const token = (await ask("Manager bot token: ")).trim();
-  const ownerIdStr = (await ask("Your Telegram user ID: ")).trim();
-  const licenseKeyInput = (await ask("License key (Enter for 7-day free trial): ")).trim();
-  rl.close();
+  // Step 1/3: Bot token with live validation
+  console.log("Step 1/3: Manager Bot");
+  console.log("  Create a bot via @BotFather on Telegram and paste the token here.");
+  console.log("  It looks like: 123456:ABC-DEF...\n");
 
-  if (!token || !/^\d+:[A-Za-z0-9_-]+$/.test(token)) {
-    console.error("Invalid bot token format.");
-    process.exit(1);
+  let token = "";
+  let botUsername = "";
+  while (true) {
+    token = (await ask("  Bot token: ")).trim();
+    if (!token || !/^\d+:[A-Za-z0-9_-]+$/.test(token)) {
+      console.log("  Invalid format. Token looks like: 123456:ABC-DEF...\n");
+      continue;
+    }
+    try {
+      const res = await fetch(`https://api.telegram.org/bot${token}/getMe`);
+      const data = (await res.json()) as { ok: boolean; result?: { username: string } };
+      if (!data.ok) {
+        console.log("  Token rejected by Telegram. Check it and try again.\n");
+        continue;
+      }
+      botUsername = data.result!.username;
+      console.log(`  Connected to @${botUsername}\n`);
+      break;
+    } catch {
+      console.log("  Could not reach Telegram API. Check your connection.\n");
+      continue;
+    }
   }
 
-  const ownerId = parseInt(ownerIdStr, 10);
-  if (isNaN(ownerId)) {
-    console.error("Invalid user ID — must be a number.");
-    process.exit(1);
+  // Step 2/3: Owner Telegram ID
+  console.log("Step 2/3: Your Telegram ID");
+  console.log("  This ensures only you can use the bot.");
+  console.log("  To find your ID:");
+  console.log("    1. Open Telegram and search for @userinfobot");
+  console.log("    2. Send it any message — it replies with your user ID\n");
+
+  let ownerId = 0;
+  while (true) {
+    const ownerIdStr = (await ask("  Your Telegram user ID: ")).trim();
+    ownerId = parseInt(ownerIdStr, 10);
+    if (!ownerIdStr || isNaN(ownerId) || ownerId <= 0) {
+      console.log("  Invalid ID — must be a positive number.\n");
+      continue;
+    }
+    console.log(`  Owner set to ${ownerId}\n`);
+    break;
   }
 
+  // Write config
   fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
   fs.writeFileSync(
     CONFIG_FILE,
@@ -93,31 +123,41 @@ async function cmdSetup(): Promise<void> {
     { mode: 0o600 }
   );
 
-  console.log(`\nConfig saved to ${CONFIG_FILE}`);
+  // Step 3/3: License
+  const { PAYMENT_URL, activateLicense, defaultLicenseState, saveLicense } = await import("./license.js");
 
-  // Handle license activation or trial
+  console.log("Step 3/3: License");
+  console.log(`  Get a license at: ${PAYMENT_URL}`);
+  console.log("  Already have a key? Paste it below.");
+  console.log("  Or press Enter to start a 7-day free trial (50 queries).\n");
+
+  const licenseKeyInput = (await ask("  License key (Enter for free trial): ")).trim();
+  rl.close();
+
+  let licenseStatus = "";
   if (licenseKeyInput) {
-    const { activateLicense } = await import("./license.js");
-    console.log("\nActivating license...");
+    console.log("\n  Activating license...");
     const result = await activateLicense(licenseKeyInput, ownerId);
     if (result.success) {
-      console.log("License activated successfully!");
+      licenseStatus = "Active";
+      console.log("  License activated successfully!\n");
     } else {
-      console.error(`License activation failed: ${result.error}`);
-      console.log("You can activate later: claude-on-phone activate <key>");
-      console.log("Starting with 7-day free trial instead.");
-      const { defaultLicenseState: defaultState, saveLicense: saveLic } = await import("./license.js");
-      saveLic(defaultState());
+      console.log(`  Activation failed: ${result.error}`);
+      console.log("  Starting with free trial instead.\n");
+      saveLicense(defaultLicenseState());
+      licenseStatus = "Free trial (7 days, 50 queries)";
     }
   } else {
-    // Initialize trial state
-    const { defaultLicenseState, saveLicense } = await import("./license.js");
     saveLicense(defaultLicenseState());
-    console.log("\nStarting 7-day free trial (50 queries).");
-    console.log("Activate anytime: claude-on-phone activate <key>");
+    licenseStatus = "Free trial (7 days, 50 queries)";
   }
 
-  console.log("Run: claude-on-phone start");
+  // Completion summary
+  console.log("Setup complete!");
+  console.log(`  Bot: @${botUsername}`);
+  console.log(`  Owner: ${ownerId}`);
+  console.log(`  License: ${licenseStatus}`);
+  console.log("  Run: claude-on-phone start");
 }
 
 function cmdStart(): void {
