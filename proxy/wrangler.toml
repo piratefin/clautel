@@ -6,7 +6,13 @@ routes = [
   { pattern = "license.clautel.com", custom_domain = true }
 ]
 
+[[kv_namespaces]]
+binding = "LICENSE_KV"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
 [vars]
 DODO_BASE_URL = "https://live.dodopayments.com"
 
 # Set via: wrangler secret put ED25519_PRIVATE_KEY_HEX
+# Create KV namespace: wrangler kv namespace create LICENSE_KV
+# Then replace the id above with the output

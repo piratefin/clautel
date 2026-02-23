@@ -1,6 +1,13 @@
 interface Env {
   DODO_BASE_URL: string;
   ED25519_PRIVATE_KEY_HEX: string;
+  LICENSE_KV: KVNamespace;
+}
+
+interface KVBinding {
+  instanceName: string;
+  instanceId: string;
+  activatedAt: string;
 }
 
 interface SignedToken {
@@ -118,6 +125,16 @@ async function handleActivate(body: Record<string, unknown>, env: Env): Promise<
     return errorResponse("Missing license_key or name", 400);
   }
 
+  // Check if this key is already bound to a different machine
+  const kvKey = `license:${licenseKey}`;
+  const existing = await env.LICENSE_KV.get<KVBinding>(kvKey, "json");
+  if (existing && existing.instanceName !== name) {
+    return errorResponse(
+      "This license key is already activated on another machine. Deactivate it first with: clautel deactivate",
+      409
+    );
+  }
+
   const dodoRes = await fetch(`${env.DODO_BASE_URL}/licenses/activate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -136,6 +153,14 @@ async function handleActivate(body: Record<string, unknown>, env: Env): Promise<
   if (!dodoData.id || typeof dodoData.id !== "string") {
     return errorResponse("Invalid response from license server", 502);
   }
+
+  // Bind this key to this machine in KV
+  const binding: KVBinding = {
+    instanceName: name,
+    instanceId: dodoData.id,
+    activatedAt: new Date().toISOString(),
+  };
+  await env.LICENSE_KV.put(kvKey, JSON.stringify(binding));
 
   const now = Math.floor(Date.now() / 1000);
   const token: SignedToken = {
@@ -157,6 +182,23 @@ async function handleValidate(body: Record<string, unknown>, env: Env): Promise<
   const instanceId = body.license_key_instance_id;
   if (!licenseKey || typeof licenseKey !== "string" || !instanceId || typeof instanceId !== "string") {
     return errorResponse("Missing license_key or license_key_instance_id", 400);
+  }
+
+  // Check KV binding — reject if instanceId doesn't match the activated machine
+  const kvKey = `license:${licenseKey}`;
+  const existing = await env.LICENSE_KV.get<KVBinding>(kvKey, "json");
+  if (existing && existing.instanceId !== instanceId) {
+    const now = Math.floor(Date.now() / 1000);
+    const token: SignedToken = {
+      licenseKey,
+      instanceId,
+      status: "invalid",
+      issuedAt: now,
+      expiresAt: now + 3600,
+    };
+    const privateKey = await getPrivateKey(env.ED25519_PRIVATE_KEY_HEX);
+    const signature = await signToken(token, privateKey);
+    return jsonResponse({ token, signature }, 403);
   }
 
   const dodoRes = await fetch(`${env.DODO_BASE_URL}/licenses/validate`, {
@@ -223,6 +265,11 @@ async function handleDeactivate(body: Record<string, unknown>, env: Env): Promis
       license_key_instance_id: instanceId,
     }),
   });
+
+  // Clear KV binding on successful deactivation — frees key for another machine
+  if (dodoRes.status === 200) {
+    await env.LICENSE_KV.delete(`license:${licenseKey}`);
+  }
 
   const text = await dodoRes.text();
   return new Response(text, {

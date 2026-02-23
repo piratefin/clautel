@@ -124,13 +124,22 @@ async function cmdSetup(): Promise<void> {
   );
 
   // Step 3/3: License
-  const { getPaymentUrl, activateLicense, detectClaudePlan, getPlanLabel } = await import("./license.js");
+  const { getPaymentUrl, activateLicense, detectClaudePlan, getPlanLabel, saveClaudePlan } = await import("./license.js");
 
-  const { tier } = detectClaudePlan();
-  const planLabel = getPlanLabel(tier);
+  const autoDetected = detectClaudePlan().tier;
 
   console.log("Step 3/3: License");
-  console.log(`  Detected Claude plan: ${tier === "max" ? "Max (Opus default)" : "Pro (Sonnet default)"}`);
+  console.log(`  Auto-detected Claude plan: ${autoDetected === "max" ? "Max (Opus default)" : "Pro (Sonnet default)"}`);
+
+  let tier = autoDetected;
+  const confirmPlan = (await ask(`  Is this correct? [Y/n]: `)).trim().toLowerCase();
+  if (confirmPlan === "n" || confirmPlan === "no") {
+    tier = autoDetected === "max" ? "pro" : "max";
+    console.log(`  Switched to: ${tier === "max" ? "Max (Opus default)" : "Pro (Sonnet default)"}`);
+  }
+  saveClaudePlan(tier);
+
+  const planLabel = getPlanLabel(tier);
   console.log(`  Your price: ${planLabel}`);
   console.log(`  Get a license at: ${getPaymentUrl(tier)}`);
   console.log("  Paste your license key below.\n");

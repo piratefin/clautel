@@ -22,8 +22,8 @@ const TOKEN_OFFLINE_MAX_MS = 24 * 60 * 60 * 1000; // 24 hours
 export type PlanTier = "pro" | "max";
 
 const PAYMENT_PRODUCTS: Record<PlanTier, string> = {
-  pro: "pdt_0NZ4nZm2ssXq7ZXBkwvcp",
-  max: "pdt_0NZ4noNAkdJ9nIDIO8PJa",
+  pro: "pdt_0NZ6rPbGSyjuJsUJKmXaY",
+  max: "pdt_0NZ6rUPAClxiXuf21uJYO",
 };
 
 const PLAN_LABELS: Record<PlanTier, string> = {
@@ -115,18 +115,53 @@ export function getPlanLabel(plan: PlanTier): string {
 let _claudePlanCache: { tier: PlanTier; timestamp: number } | null = null;
 const PLAN_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
+const CLAUTEL_CONFIG_FILE = path.join(DATA_DIR, "config.json");
+
+/** Read the plan stored in ~/.clautel/config.json (set during setup). */
+function getStoredPlan(): PlanTier | null {
+  try {
+    if (fs.existsSync(CLAUTEL_CONFIG_FILE)) {
+      const raw = JSON.parse(fs.readFileSync(CLAUTEL_CONFIG_FILE, "utf-8"));
+      if (raw.claudePlan === "pro" || raw.claudePlan === "max") return raw.claudePlan;
+    }
+  } catch {}
+  return null;
+}
+
+/** Save the user-confirmed plan to ~/.clautel/config.json. */
+export function saveClaudePlan(tier: PlanTier): void {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
+    let existing: Record<string, unknown> = {};
+    try {
+      if (fs.existsSync(CLAUTEL_CONFIG_FILE)) {
+        existing = JSON.parse(fs.readFileSync(CLAUTEL_CONFIG_FILE, "utf-8"));
+      }
+    } catch {}
+    existing.claudePlan = tier;
+    fs.writeFileSync(CLAUTEL_CONFIG_FILE, JSON.stringify(existing, null, 2), { mode: 0o600 });
+    invalidatePlanCache();
+  } catch {}
+}
+
+/** Auto-detect from ~/.claude.json (fallback when no stored plan). */
+function autoDetectClaudePlan(): PlanTier {
+  const claudeConfigPath = path.join(os.homedir(), ".claude.json");
+  try {
+    if (fs.existsSync(claudeConfigPath)) {
+      const raw = JSON.parse(fs.readFileSync(claudeConfigPath, "utf-8"));
+      if (raw.hasOpusPlanDefault === true) return "max";
+    }
+  } catch {}
+  return "pro";
+}
+
 export function detectClaudePlan(): { tier: PlanTier } {
   if (_claudePlanCache && Date.now() - _claudePlanCache.timestamp < PLAN_CACHE_TTL_MS) {
     return { tier: _claudePlanCache.tier };
   }
-  const claudeConfigPath = path.join(os.homedir(), ".claude.json");
-  let tier: PlanTier = "pro";
-  try {
-    if (fs.existsSync(claudeConfigPath)) {
-      const raw = JSON.parse(fs.readFileSync(claudeConfigPath, "utf-8"));
-      if (raw.hasOpusPlanDefault === true) tier = "max";
-    }
-  } catch {}
+  const stored = getStoredPlan();
+  const tier = stored ?? autoDetectClaudePlan();
   _claudePlanCache = { tier, timestamp: Date.now() };
   return { tier };
 }
@@ -336,8 +371,9 @@ async function validateFromCache(state: LicenseState): Promise<"valid" | "invali
   const tokenAgeMs = Date.now() - cached.token.issuedAt * 1000;
   if (tokenAgeMs < 0 || tokenAgeMs > TOKEN_OFFLINE_MAX_MS) return "error";
 
-  // Check the token belongs to this license
+  // Check the token belongs to this license and this instance
   if (cached.token.licenseKey !== state.licenseKey) return "error";
+  if (cached.token.instanceId !== state.instanceId) return "invalid";
 
   return cached.token.status === "active" ? "valid" : "invalid";
 }
@@ -459,8 +495,9 @@ export async function validateLicense(
       // Check token is not expired
       if (body.token.expiresAt <= Math.floor(Date.now() / 1000)) return "error";
 
-      // Check token belongs to this license
+      // Check token belongs to this license and this instance
       if (body.token.licenseKey !== state.licenseKey) return "error";
+      if (body.token.instanceId !== state.instanceId) return "invalid";
 
       // Cache the signed token for offline fallback
       cacheSignedToken(body);
