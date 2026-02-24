@@ -51,7 +51,7 @@ export interface SendCallbacks {
     input: Record<string, unknown>
   ) => Promise<"allow" | "always" | "deny">;
   onAskUser: (questions: AskUserQuestion[]) => Promise<Record<string, string>>;
-  onPlanApproval: () => Promise<boolean>;
+  onPlanApproval: (planFileContent?: string) => Promise<boolean>;
   onResult: (result: {
     text: string;
     usage: TokenUsage;
@@ -307,6 +307,8 @@ export class ClaudeBridge {
     try {
       const model = this.selectedModels.get(chatId) || DEFAULT_MODEL;
 
+      let lastWrittenFilePath: string | null = null;
+
       const q = query({
         prompt,
         options: {
@@ -343,12 +345,46 @@ export class ClaudeBridge {
               }
             }
 
+            // Track the last file written (used to capture plan content)
+            if (toolName === "Write") {
+              const filePath = inp.file_path;
+              if (typeof filePath === "string") {
+                lastWrittenFilePath = filePath;
+              }
+            }
+
             // Interactive: show plan and get approval before proceeding
             if (toolName === "ExitPlanMode") {
               logTool(toolName, "", this.tag);
               callbacks.onStatusUpdate("Waiting for plan approval...");
+              let planFileContent: string | undefined;
+
+              // Method 1: Read from tracked Write tool path (stream events or canUseTool)
+              if (lastWrittenFilePath) {
+                try {
+                  planFileContent = fs.readFileSync(lastWrittenFilePath, "utf-8");
+                } catch {}
+              }
+
+              // Method 2: Find most recent plan file in ~/.claude/plans/
+              if (!planFileContent) {
+                try {
+                  const plansDir = path.join(os.homedir(), ".claude", "plans");
+                  if (fs.existsSync(plansDir)) {
+                    const now = Date.now();
+                    const files = fs.readdirSync(plansDir)
+                      .filter(f => f.endsWith(".md"))
+                      .map(f => ({ name: f, mtime: fs.statSync(path.join(plansDir, f)).mtimeMs }))
+                      .filter(f => now - f.mtime < 5 * 60 * 1000) // written in last 5 min
+                      .sort((a, b) => b.mtime - a.mtime);
+                    if (files.length > 0) {
+                      planFileContent = fs.readFileSync(path.join(plansDir, files[0].name), "utf-8");
+                    }
+                  }
+                } catch {}
+              }
               const approved = await Promise.race([
-                callbacks.onPlanApproval(),
+                callbacks.onPlanApproval(planFileContent),
                 new Promise<boolean>((resolve) => {
                   if (signal.aborted) { resolve(false); return; }
                   signal.addEventListener("abort", () => resolve(false), { once: true });
@@ -409,6 +445,11 @@ export class ClaudeBridge {
         },
       });
 
+      // Track tool_use blocks from stream events to capture Write file paths
+      // (canUseTool may not be called for Write in the agent SDK)
+      let streamToolName = "";
+      let streamToolInputJson = "";
+
       for await (const message of q) {
         if (abortController.signal.aborted) break;
 
@@ -419,6 +460,8 @@ export class ClaudeBridge {
           if (event.type === "content_block_start") {
             const block = event.content_block as Record<string, unknown> | undefined;
             if (block?.type === "tool_use" && typeof block.name === "string") {
+              streamToolName = block.name;
+              streamToolInputJson = "";
               const status = formatToolStatus(block.name);
               callbacks.onStatusUpdate(status);
               logStatus(status, this.tag);
@@ -434,7 +477,20 @@ export class ClaudeBridge {
                 clearInterval(thinkingInterval);
               }
               callbacks.onStreamChunk(delta.text);
+            } else if (delta?.type === "input_json_delta" && typeof delta.partial_json === "string") {
+              streamToolInputJson += delta.partial_json;
             }
+          } else if (event.type === "content_block_stop") {
+            if (streamToolName === "Write" && streamToolInputJson) {
+              try {
+                const parsed = JSON.parse(streamToolInputJson);
+                if (typeof parsed.file_path === "string") {
+                  lastWrittenFilePath = parsed.file_path;
+                }
+              } catch {}
+            }
+            streamToolName = "";
+            streamToolInputJson = "";
           }
         } else if (message.type === "result") {
           clearInterval(thinkingInterval);

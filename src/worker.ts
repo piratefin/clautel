@@ -271,18 +271,22 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
         scheduleEdit();
       };
 
-      const onPlanApproval = async (): Promise<boolean> => {
+      const onPlanApproval = async (planFileContent?: string): Promise<boolean> => {
         // Cancel any pending debounce edit so thinkingMsgId doesn't flash stale content
         if (editTimer) {
           clearTimeout(editTimer);
           editTimer = null;
         }
 
-        // Save preamble (streamed plan content) before clearing buffer
-        const fullPlan = buffer.trim();
+        // Save preamble before clearing buffer, then stabilise thinkingMsgId immediately
+        const preamble = buffer.trim();
         buffer = "";
         currentActivity = "";
         await doEdit();
+
+        // Combine preamble with the plan file Claude wrote
+        const planBody = planFileContent?.trim() ?? "";
+        const fullPlan = planBody || preamble;
 
         if (fullPlan) {
           const html = claudeToTelegram(fullPlan);
