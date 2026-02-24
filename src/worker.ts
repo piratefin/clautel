@@ -44,6 +44,10 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
     string,
     { resolve: (answer: string) => void; timer: NodeJS.Timeout; options: Array<{ label: string }>; question: string }
   >();
+  const pendingFreeText = new Map<
+    number,
+    { resolve: (answer: string) => void; timer: NodeJS.Timeout; question: string; msgId: number }
+  >();
   let approvalCounter = 0;
   let retryCounter = 0;
 
@@ -267,10 +271,27 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
         scheduleEdit();
       };
 
-      const onPlanApproval = async (): Promise<boolean> => {
-        // Send the accumulated plan text as separate messages so user can review
-        if (buffer.trim()) {
-          const html = claudeToTelegram(buffer);
+      const onPlanApproval = async (planFileContent?: string): Promise<boolean> => {
+        // Cancel any pending debounce edit so thinkingMsgId doesn't flash stale content
+        if (editTimer) {
+          clearTimeout(editTimer);
+          editTimer = null;
+        }
+
+        // Save preamble before clearing buffer, then stabilise thinkingMsgId immediately
+        const preamble = buffer.trim();
+        buffer = "";
+        currentActivity = "";
+        await doEdit();
+
+        // Combine preamble with the plan file Claude wrote
+        const planBody = planFileContent?.trim() ?? "";
+        const fullPlan = preamble && planBody
+          ? `${preamble}\n\n${planBody}`
+          : preamble || planBody;
+
+        if (fullPlan) {
+          const html = claudeToTelegram(fullPlan);
           const parts = splitMessage(html);
           for (const part of parts) {
             try {
@@ -281,10 +302,7 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
           }
         }
 
-        // Reset buffer so implementation phase streams cleanly
-        buffer = "";
         currentActivity = "Waiting for plan approval...";
-        scheduleEdit();
 
         const requestId = String(++approvalCounter);
         const keyboard = new InlineKeyboard()
@@ -323,8 +341,9 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
           const keyboard = new InlineKeyboard();
           q.options.forEach((opt, optIdx) => {
             keyboard.text(opt.label, `answer:${requestId}:${optIdx}`);
-            if (optIdx < q.options.length - 1) keyboard.row();
+            keyboard.row();
           });
+          keyboard.text("Other…", `answer:${requestId}:other`);
 
           const answer = await new Promise<string>((resolve) => {
             const timer = setTimeout(() => {
@@ -494,10 +513,25 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
   }
 
   bot.on("message:text", (ctx) => {
+    const chatId = ctx.chat.id;
+
+    // Check if waiting for a free-text answer to an AskUserQuestion
+    const freeText = pendingFreeText.get(chatId);
+    if (freeText) {
+      clearTimeout(freeText.timer);
+      pendingFreeText.delete(chatId);
+      bot.api.editMessageText(chatId, freeText.msgId,
+        `<b>${escapeHtml(freeText.question)}</b>\n\nAnswer: <b>${escapeHtml(ctx.message.text)}</b>`,
+        { parse_mode: "HTML" }
+      ).catch(() => {});
+      freeText.resolve(ctx.message.text);
+      return;
+    }
+
     const replyCtx = extractReplyContext(ctx);
     const prompt = replyCtx + ctx.message.text;
     logUser(ctx.message.text, tag);
-    handlePrompt(ctx.chat.id, prompt, (text) => ctx.reply(text));
+    handlePrompt(chatId, prompt, (text) => ctx.reply(text));
   });
 
   bot.on("message:document", async (ctx) => {
@@ -626,12 +660,34 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
     if (data.startsWith("answer:")) {
       const parts = data.split(":");
       const requestId = parts[1];
-      const optIdx = Number(parts[2]);
+      const optPart = parts[2];
       const pending = pendingAnswers.get(requestId);
       if (!pending) {
         await ctx.answerCallbackQuery("Request expired").catch(() => {});
         return;
       }
+
+      if (optPart === "other") {
+        // Move to free-text mode: clear options timer, wait for next message
+        clearTimeout(pending.timer);
+        pendingAnswers.delete(requestId);
+        await ctx.answerCallbackQuery("Type your answer").catch(() => {});
+        await ctx.editMessageText(
+          `<b>${escapeHtml(pending.question)}</b>\n\nType your answer:`,
+          { parse_mode: "HTML" }
+        ).catch(() => {});
+        const chatId = ctx.chat!.id;
+        const sentMsg = await bot.api.sendMessage(chatId, "Send your reply now…");
+        const timer = setTimeout(() => {
+          pendingFreeText.delete(chatId);
+          bot.api.editMessageText(chatId, sentMsg.message_id, "Timed out waiting for answer.").catch(() => {});
+          pending.resolve("");
+        }, APPROVAL_TIMEOUT_MS);
+        pendingFreeText.set(chatId, { resolve: pending.resolve, timer, question: pending.question, msgId: sentMsg.message_id });
+        return;
+      }
+
+      const optIdx = Number(optPart);
       clearTimeout(pending.timer);
       pendingAnswers.delete(requestId);
 

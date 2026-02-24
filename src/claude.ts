@@ -52,7 +52,7 @@ export interface SendCallbacks {
     input: Record<string, unknown>
   ) => Promise<"allow" | "always" | "deny">;
   onAskUser: (questions: AskUserQuestion[]) => Promise<Record<string, string>>;
-  onPlanApproval: () => Promise<boolean>;
+  onPlanApproval: (planFileContent?: string) => Promise<boolean>;
   onResult: (result: {
     text: string;
     usage: TokenUsage;
@@ -308,6 +308,8 @@ export class ClaudeBridge {
     try {
       const model = this.selectedModels.get(chatId) || DEFAULT_MODEL;
 
+      let lastWrittenFilePath: string | null = null;
+
       const q = query({
         prompt,
         options: {
@@ -344,12 +346,26 @@ export class ClaudeBridge {
               }
             }
 
+            // Track the last file written (used to capture plan content)
+            if (toolName === "Write") {
+              const filePath = inp.file_path;
+              if (typeof filePath === "string") {
+                lastWrittenFilePath = filePath;
+              }
+            }
+
             // Interactive: show plan and get approval before proceeding
             if (toolName === "ExitPlanMode") {
               logTool(toolName, "", this.tag);
               callbacks.onStatusUpdate("Waiting for plan approval...");
+              let planFileContent: string | undefined;
+              if (lastWrittenFilePath) {
+                try {
+                  planFileContent = fs.readFileSync(lastWrittenFilePath, "utf-8");
+                } catch {}
+              }
               const approved = await Promise.race([
-                callbacks.onPlanApproval(),
+                callbacks.onPlanApproval(planFileContent),
                 new Promise<boolean>((resolve) => {
                   if (signal.aborted) { resolve(false); return; }
                   signal.addEventListener("abort", () => resolve(false), { once: true });
