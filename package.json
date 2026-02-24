@@ -37,7 +37,7 @@
     "mobile"
   ],
   "dependencies": {
-    "@anthropic-ai/claude-code": "^1",
+    "@anthropic-ai/claude-agent-sdk": "^0.2.52",
     "dotenv": "^16",
     "grammy": "^1"
   },

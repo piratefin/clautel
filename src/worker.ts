@@ -271,24 +271,18 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
         scheduleEdit();
       };
 
-      const onPlanApproval = async (planFileContent?: string): Promise<boolean> => {
+      const onPlanApproval = async (): Promise<boolean> => {
         // Cancel any pending debounce edit so thinkingMsgId doesn't flash stale content
         if (editTimer) {
           clearTimeout(editTimer);
           editTimer = null;
         }
 
-        // Save preamble before clearing buffer, then stabilise thinkingMsgId immediately
-        const preamble = buffer.trim();
+        // Save preamble (streamed plan content) before clearing buffer
+        const fullPlan = buffer.trim();
         buffer = "";
         currentActivity = "";
         await doEdit();
-
-        // Combine preamble with the plan file Claude wrote
-        const planBody = planFileContent?.trim() ?? "";
-        const fullPlan = preamble && planBody
-          ? `${preamble}\n\n${planBody}`
-          : preamble || planBody;
 
         if (fullPlan) {
           const html = claudeToTelegram(fullPlan);
@@ -367,7 +361,7 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
               });
           });
 
-          answers[String(i)] = answer;
+          answers[q.question] = answer;
         }
 
         return answers;
