@@ -74,6 +74,7 @@ export function createManager(callbacks: ManagerCallbacks): Bot {
     "/add — Add a new worker bot (interactive)\n" +
     "/add TOKEN /path/to/repo — Add a worker bot (inline)\n" +
     "/remove @username — Remove a worker bot\n" +
+    "/remove all — Remove all worker bots\n" +
     "/subscribe — Get a license or upgrade your plan\n" +
     "/subscription — View license status, billing &amp; cancellation\n" +
     "/feedback — Send feedback or report an issue\n" +
@@ -183,33 +184,58 @@ export function createManager(callbacks: ManagerCallbacks): Bot {
   });
 
   bot.command("remove", async (ctx) => {
-    const username = ctx.match?.trim().replace(/^@/, "");
-    if (!username) {
-      await ctx.reply("Usage: <code>/remove @bot_username</code>", {
+    const arg = ctx.match?.trim().replace(/^@/, "");
+    if (!arg) {
+      await ctx.reply("Usage: <code>/remove @bot_username</code> or <code>/remove all</code>", {
         parse_mode: "HTML",
       });
+      return;
+    }
+
+    // Remove all workers at once
+    if (arg === "all") {
+      const workers = callbacks.getActiveWorkers();
+      if (workers.size === 0) {
+        await ctx.reply("No active workers to remove.");
+        return;
+      }
+      const ids = [...workers.keys()];
+      const usernames = [...workers.values()].map((w) => `@${w.config.username}`);
+      const errors: string[] = [];
+      for (const id of ids) {
+        try {
+          await callbacks.stopWorker(id);
+        } catch (err) {
+          errors.push(String(err));
+        }
+      }
+      if (errors.length === 0) {
+        await ctx.reply(`Removed all workers: ${usernames.join(", ")}`);
+      } else {
+        await ctx.reply(`Removed workers with errors:\n${errors.join("\n")}`);
+      }
       return;
     }
 
     const workers = callbacks.getActiveWorkers();
     let foundId: number | null = null;
     for (const [id, w] of workers) {
-      if (w.config.username === username) {
+      if (w.config.username === arg) {
         foundId = id;
         break;
       }
     }
 
     if (foundId === null) {
-      await ctx.reply(`Bot @${username} not found in active workers.`);
+      await ctx.reply(`Bot @${arg} not found in active workers.`);
       return;
     }
 
     try {
       await callbacks.stopWorker(foundId);
-      await ctx.reply(`Removed @${username}. Bot stopped.`);
+      await ctx.reply(`Removed @${arg}. Bot stopped.`);
     } catch (err) {
-      await ctx.reply(`Error removing @${username}: ${err}`);
+      await ctx.reply(`Error removing @${arg}: ${err}`);
     }
   });
 

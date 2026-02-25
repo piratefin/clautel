@@ -40,7 +40,7 @@ const WORKER_COMMANDS = [
 const MANAGER_COMMANDS = [
   { command: "bots",         description: "List active worker bots" },
   { command: "add",          description: "Add a new worker bot" },
-  { command: "remove",       description: "Remove a worker bot" },
+  { command: "remove",       description: "Remove a worker bot (or 'all')" },
   { command: "subscribe",    description: "Get a license or upgrade" },
   { command: "subscription", description: "View license, billing & cancel" },
   { command: "feedback",     description: "Send feedback or report an issue" },

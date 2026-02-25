@@ -192,8 +192,22 @@ async function cmdStart(): Promise<void> {
     process.exit(1);
   }
 
-  // On macOS, install launchd service if not already present (auto-start on login + crash recovery)
-  if (process.platform === "darwin" && !fs.existsSync(getPlistPath())) {
+  // On macOS with launchd service installed, use launchctl to start
+  if (process.platform === "darwin" && fs.existsSync(getPlistPath())) {
+    const load = spawn("launchctl", ["load", getPlistPath()], { stdio: "inherit" });
+    load.on("close", (code) => {
+      if (code === 0) {
+        console.log("Started via launchd.");
+        console.log(`Logs: clautel logs`);
+      } else {
+        console.error("Failed to start service via launchctl.");
+      }
+    });
+    return;
+  }
+
+  // On macOS without service installed, install it now
+  if (process.platform === "darwin") {
     console.log("Installing auto-start service...");
     await cmdInstallService();
     return;
@@ -219,6 +233,29 @@ async function cmdStart(): Promise<void> {
 }
 
 function cmdStop(): void {
+  // On macOS with launchd service installed, use launchctl to unload so
+  // KeepAlive doesn't immediately restart the daemon
+  if (process.platform === "darwin" && fs.existsSync(getPlistPath())) {
+    const pid = readPid();
+    const unload = spawn("launchctl", ["unload", getPlistPath()], { stdio: "inherit" });
+    unload.on("close", (code) => {
+      if (code === 0) {
+        fs.rmSync(PID_FILE, { force: true });
+        console.log("Stopped (launchd service unloaded).");
+      } else {
+        // Fall back to SIGTERM if launchctl fails
+        if (pid && isRunning(pid)) {
+          process.kill(pid, "SIGTERM");
+          fs.rmSync(PID_FILE, { force: true });
+          console.log(`Stopped (PID ${pid})`);
+        } else {
+          console.error("Failed to stop service via launchctl.");
+        }
+      }
+    });
+    return;
+  }
+
   const pid = readPid();
   if (!pid || !isRunning(pid)) {
     console.log("Not running.");
