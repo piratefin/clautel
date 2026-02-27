@@ -185,6 +185,7 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
       }
 
       bridge.setSessionId(chatId, args);
+      await sendSessionHistory(chatId, args);
       await ctx.reply(`Session resumed: <code>${args}</code>\n\nSend a message to continue.`, { parse_mode: "HTML" });
     } else {
       // List recent sessions
@@ -556,6 +557,31 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
     return `[Replying to message: "${preview}"]\n\n`;
   }
 
+  async function sendSessionHistory(chatId: number, sessionId: string): Promise<void> {
+    try {
+      const history = bridge.getSessionHistory(sessionId, 10);
+      if (history.length === 0) return;
+
+      let html = "<b>Conversation history:</b>\n\n";
+      for (const entry of history) {
+        if (entry.role === "user") {
+          html += `<b>You:</b>\n${escapeHtml(entry.text)}\n\n`;
+        } else {
+          html += `<b>Claude:</b>\n${claudeToTelegram(entry.text)}\n\n`;
+        }
+      }
+
+      const parts = splitMessage(html.trimEnd());
+      for (const part of parts) {
+        try {
+          await bot.api.sendMessage(chatId, part, { parse_mode: "HTML" });
+        } catch {
+          await bot.api.sendMessage(chatId, part).catch(() => {});
+        }
+      }
+    } catch {}
+  }
+
   bot.on("message:text", (ctx) => {
     const chatId = ctx.chat.id;
 
@@ -695,6 +721,7 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge): Bot {
         `Session resumed: <code>${sessionId}</code>\n\nSend a message to continue.`,
         { parse_mode: "HTML" }
       ).catch(() => {});
+      await sendSessionHistory(chatId, sessionId);
       await ctx.answerCallbackQuery("Session resumed").catch(() => {});
       return;
     }

@@ -295,6 +295,57 @@ export class ClaudeBridge {
     });
   }
 
+  getSessionHistory(sessionId: string, limit = 10): Array<{ role: "user" | "assistant"; text: string; timestamp: string }> {
+    try {
+      const filePath = path.join(this.getProjectSessionsDir(), `${sessionId}.jsonl`);
+      if (!fs.existsSync(filePath)) return [];
+
+      const raw = fs.readFileSync(filePath, "utf-8");
+      const entries: Array<{ role: "user" | "assistant"; text: string; timestamp: string }> = [];
+
+      for (const line of raw.split("\n")) {
+        if (!line.trim()) continue;
+        try {
+          const entry = JSON.parse(line);
+          if (entry.type !== "user" && entry.type !== "assistant") continue;
+
+          const content = entry.message?.content;
+          let text = "";
+
+          if (entry.type === "user") {
+            if (typeof content === "string") {
+              text = content;
+            } else if (Array.isArray(content)) {
+              const textBlock = content.find((b: Record<string, unknown>) => b.type === "text");
+              if (textBlock) text = String(textBlock.text || "");
+            }
+          } else {
+            // assistant — extract only text blocks, skip thinking/tool_use
+            if (Array.isArray(content)) {
+              const texts = content
+                .filter((b: Record<string, unknown>) => b.type === "text")
+                .map((b: Record<string, unknown>) => String(b.text || ""));
+              text = texts.join("\n");
+            }
+          }
+
+          if (!text.trim()) continue;
+
+          const truncated = text.length > 500 ? text.slice(0, 500) + "..." : text;
+          entries.push({
+            role: entry.type as "user" | "assistant",
+            text: truncated,
+            timestamp: entry.timestamp || "",
+          });
+        } catch {}
+      }
+
+      return entries.slice(-limit);
+    } catch {
+      return [];
+    }
+  }
+
   cancelQuery(chatId: number): boolean {
     const controller = this.activeAborts.get(chatId);
     if (controller) {
