@@ -25,6 +25,8 @@ const PID_FILE = path.join(DATA_DIR, "daemon.pid");
 const HEALTH_CHECK_INTERVAL_MS = 60_000; // 1 minute — fast recovery after sleep/network loss
 
 const activeWorkers = new Map<number, { config: BotConfig; bot: Bot; bridge: ClaudeBridge; browserManager: BrowserManager }>();
+const lastWorkerError = new Map<number, number>(); // botId → timestamp of last polling error
+const RESTART_COOLDOWN_MS = 120_000; // wait 2 minutes before restarting a failed worker
 let healthCheckTimer: NodeJS.Timeout | null = null;
 let licenseTimer: NodeJS.Timeout | null = null;
 
@@ -33,6 +35,7 @@ const WORKER_COMMANDS = [
   { command: "model",      description: "Switch Claude model (Opus / Sonnet / Haiku)" },
   { command: "cost",       description: "Show token usage for this session" },
   { command: "session",    description: "Get session ID to resume in CLI" },
+  { command: "resume",     description: "Resume a CLI session in Telegram" },
   { command: "cancel",     description: "Abort the current operation" },
   { command: "feedback",   description: "Send feedback or report an issue" },
   { command: "help",       description: "Show help" },
@@ -63,10 +66,13 @@ async function startWorker(botConfig: BotConfig): Promise<void> {
   activeWorkers.set(botConfig.id, { config: botConfig, bot, bridge, browserManager });
 
   // Fire-and-forget: polling runs in background
-  // On error, remove from activeWorkers but KEEP in bots.json so health check restarts it
+  // On error, clean up properly and remove from activeWorkers (kept in bots.json so health check restarts it)
   bot.start().catch((err: Error) => {
     console.error(`[${botConfig.username}] Polling error:`, err.message);
+    bridge.abortAll();
+    try { bot.stop(); } catch {}
     activeWorkers.delete(botConfig.id);
+    lastWorkerError.set(botConfig.id, Date.now());
   });
 
   console.log(`Worker started: @${botConfig.username} → ${botConfig.workingDir}`);
@@ -176,11 +182,18 @@ async function main() {
     const savedBots = loadBots();
     for (const botConfig of savedBots) {
       if (!activeWorkers.has(botConfig.id)) {
+        // Respect cooldown to prevent rapid restart loops (409 Conflict cycles)
+        const lastError = lastWorkerError.get(botConfig.id);
+        if (lastError && Date.now() - lastError < RESTART_COOLDOWN_MS) {
+          continue;
+        }
         try {
           await startWorker(botConfig);
+          lastWorkerError.delete(botConfig.id);
           console.log(`[${botConfig.username}] Recovered from saved config`);
         } catch (err) {
           console.error(`[${botConfig.username}] Recovery failed: ${(err as Error).message}`);
+          lastWorkerError.set(botConfig.id, Date.now());
         }
       }
     }
