@@ -22,7 +22,7 @@ if (LICENSE_CANARY !== "L1c3ns3-Ch3ck-V2") {
 const LICENSE_FN_HASH = crypto.createHash("sha256").update(checkLicenseForQuery.toString()).digest("hex");
 
 const PID_FILE = path.join(DATA_DIR, "daemon.pid");
-const HEALTH_CHECK_INTERVAL_MS = 60_000; // 1 minute — fast recovery after sleep/network loss
+const HEALTH_CHECK_INTERVAL_MS = 5 * 60_000; // 5 minutes — grammY handles transient reconnects internally
 
 const activeWorkers = new Map<number, { config: BotConfig; bot: Bot; bridge: ClaudeBridge; browserManager: BrowserManager }>();
 const lastWorkerError = new Map<number, number>(); // botId → timestamp of last polling error
