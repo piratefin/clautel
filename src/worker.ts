@@ -23,7 +23,7 @@ if (LICENSE_CANARY !== "L1c3ns3-Ch3ck-V2") {
 
 const TYPING_INTERVAL_MS = 4000;
 const EDIT_DEBOUNCE_MS = 1500;
-const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000;
+const APPROVAL_TIMEOUT_MS = 2 * 60 * 60 * 1000; // 2 hours — users interact async on mobile
 const FETCH_TIMEOUT_MS = 30_000;
 const MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024; // 20 MB
 const REPLY_PREVIEW_MAX = 500;
