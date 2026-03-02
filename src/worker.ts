@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { Bot, InlineKeyboard } from "grammy";
-import { config } from "./config.js";
+import { config, DATA_DIR } from "./config.js";
 import { ClaudeBridge, AVAILABLE_MODELS } from "./claude.js";
 import type { BotConfig } from "./store.js";
 import { TunnelManager, parsePort } from "./tunnel.js";
@@ -14,6 +14,8 @@ import {
 import type { AskUserQuestion } from "./claude.js";
 import { logUser, logStream, logResult, logError } from "./log.js";
 import { checkLicenseForQuery, getPaymentUrl, detectClaudePlan, LICENSE_CANARY } from "./license.js";
+
+const CONFIG_FILE = path.join(DATA_DIR, "config.json");
 
 // Cross-module integrity: verify license module hasn't been patched
 if (LICENSE_CANARY !== "L1c3ns3-Ch3ck-V2") {
@@ -49,8 +51,20 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge, tunnelM
     number,
     { resolve: (answer: string) => void; timer: NodeJS.Timeout; question: string; msgId: number }
   >();
+  const pendingNgrokSetup = new Map<number, { port: number }>();
   let approvalCounter = 0;
   let retryCounter = 0;
+
+  function saveNgrokToken(token: string): void {
+    let existing: Record<string, unknown> = {};
+    try {
+      if (fs.existsSync(CONFIG_FILE)) {
+        existing = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf-8"));
+      }
+    } catch {}
+    existing.NGROK_AUTH_TOKEN = token;
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(existing, null, 2), { mode: 0o600 });
+  }
 
   bot.catch((err) => {
     console.error(`[${tag}] Bot error:`, err.message);
@@ -248,7 +262,13 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge, tunnelM
     }
 
     if (!config.NGROK_AUTH_TOKEN) {
-      await ctx.reply("No ngrok token configured.\n\nRun `clautel setup` or set the NGROK_AUTH_TOKEN environment variable.\n\nGet a free token at: https://dashboard.ngrok.com/get-started/your-authtoken");
+      pendingNgrokSetup.set(chatId, { port });
+      await ctx.reply(
+        "To use live preview, you need an ngrok auth token.\n\n" +
+        "1. Sign up at https://ngrok.com (free)\n" +
+        "2. Copy your token from: https://dashboard.ngrok.com/get-started/your-authtoken\n\n" +
+        "Paste your token here:"
+      );
       return;
     }
 
@@ -642,6 +662,41 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge, tunnelM
 
     // Reset tunnel inactivity timer on any bot activity
     tunnelManager.resetTimer(chatId);
+
+    // Check if waiting for ngrok auth token
+    const ngrokSetup = pendingNgrokSetup.get(chatId);
+    if (ngrokSetup) {
+      pendingNgrokSetup.delete(chatId);
+      const token = ctx.message.text.trim();
+      if (!token) {
+        ctx.reply("No token provided. Use /preview <port> to try again.").catch(() => {});
+        return;
+      }
+
+      tunnelManager.setAuthToken(token);
+      (async () => {
+        try {
+          const url = await tunnelManager.openTunnel(chatId, ngrokSetup.port);
+          // Token works — persist it
+          saveNgrokToken(token);
+          config.NGROK_AUTH_TOKEN = token;
+          const keyboard = new InlineKeyboard().text("Close Preview", `tunnel:close:${chatId}`);
+          await bot.api.sendMessage(
+            chatId,
+            `Token saved!\n\nLive preview: ${url}\n\nOpen this URL on your phone to see your dev server (port ${ngrokSetup.port}).`,
+            { reply_markup: keyboard }
+          );
+        } catch (err) {
+          // Don't persist bad token — clear so next /preview re-prompts
+          tunnelManager.setAuthToken(undefined);
+          await bot.api.sendMessage(
+            chatId,
+            `Tunnel error: ${(err as Error).message}\n\nCheck your token and try /preview ${ngrokSetup.port} again.`
+          );
+        }
+      })().catch(() => {});
+      return;
+    }
 
     // Check if waiting for a free-text answer to an AskUserQuestion
     const freeText = pendingFreeText.get(chatId);

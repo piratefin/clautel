@@ -19,6 +19,10 @@ export class TunnelManager {
     this.authToken = authToken;
   }
 
+  setAuthToken(token: string | undefined): void {
+    this.authToken = token;
+  }
+
   setAutoCloseCallback(cb: (chatId: number, port: number) => void): void {
     this.onAutoClose = cb;
   }
