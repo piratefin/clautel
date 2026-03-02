@@ -13,7 +13,7 @@
     "node": ">=18"
   },
   "scripts": {
-    "build": "tsc && chmod +x dist/cli.js",
+    "build": "rm -rf dist && tsc && chmod +x dist/cli.js",
     "start": "tsx src/daemon.ts",
     "dev": "tsx watch src/daemon.ts",
     "cli": "tsx src/cli.ts",
