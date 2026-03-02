@@ -30,6 +30,7 @@ const MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024; // 20 MB
 const REPLY_PREVIEW_MAX = 500;
 const STREAM_MAX_LEN = 4000;
 const FEEDBACK_FORM_URL = "https://forms.gle/5r3j1uqK4YP7KWSA9";
+const NGROK_SETUP_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes to paste ngrok token
 
 export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge, tunnelManager: TunnelManager): Bot {
   const bot = new Bot(botConfig.token);
@@ -51,19 +52,19 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge, tunnelM
     number,
     { resolve: (answer: string) => void; timer: NodeJS.Timeout; question: string; msgId: number }
   >();
-  const pendingNgrokSetup = new Map<number, { port: number }>();
+  const pendingNgrokSetup = new Map<number, { port: number; timer: NodeJS.Timeout }>();
   let approvalCounter = 0;
   let retryCounter = 0;
 
   function saveNgrokToken(token: string): void {
     let existing: Record<string, unknown> = {};
     try {
-      if (fs.existsSync(CONFIG_FILE)) {
-        existing = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf-8"));
+      existing = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf-8"));
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        console.error(`[${tag}] Failed to parse config file, not saving ngrok token:`, error);
+        return;
       }
-    } catch (error) {
-      console.error(`[${tag}] Failed to parse config file, not saving ngrok token:`, error);
-      return;
     }
     existing.NGROK_AUTH_TOKEN = token;
     fs.writeFileSync(CONFIG_FILE, JSON.stringify(existing, null, 2), { mode: 0o600 });
@@ -257,19 +258,14 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge, tunnelM
     }
   }
 
-  function buildPreviewPrompt(): string {
-    const tokenPart = `The ngrok auth token is stored in the NGROK_AUTH_TOKEN environment variable or in the project's config file at ${CONFIG_FILE}.`;
-
-    return (
-      "Start the dev server for this project. Install any missing dependencies if needed. " +
-      "If you encounter errors, fix them and retry.\n\n" +
-      "Once the server is running, expose it publicly using ngrok. " +
-      "Install ngrok CLI if it's not already installed (e.g. `brew install ngrok` or `npm install -g ngrok`). " +
-      `${tokenPart}\n\n` +
-      "Run: ngrok http <PORT> (where PORT is the dev server port).\n" +
-      "Share the public ngrok URL in your response so I can open it on my phone."
-    );
-  }
+  const PREVIEW_PROMPT =
+    "Start the dev server for this project. Install any missing dependencies if needed. " +
+    "If you encounter errors, fix them and retry.\n\n" +
+    "Once the server is running, expose it publicly using ngrok. " +
+    "Install ngrok CLI if it's not already installed (e.g. `brew install ngrok` or `npm install -g ngrok`). " +
+    `The ngrok auth token is stored in the NGROK_AUTH_TOKEN environment variable or in the project's config file at ${CONFIG_FILE}.\n\n` +
+    "Run: ngrok http <PORT> (where PORT is the dev server port).\n" +
+    "Share the public ngrok URL in your response so I can open it on my phone.";
 
   bot.command("preview", async (ctx) => {
     const chatId = ctx.chat.id;
@@ -279,7 +275,10 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge, tunnelM
     if (arg) {
       // Check ngrok token for direct tunnel
       if (!config.NGROK_AUTH_TOKEN) {
-        pendingNgrokSetup.set(chatId, { port: parsePort(arg) || 0 });
+        const timer = setTimeout(() => {
+          pendingNgrokSetup.delete(chatId);
+        }, NGROK_SETUP_TIMEOUT_MS);
+        pendingNgrokSetup.set(chatId, { port: parsePort(arg) || 0, timer });
         await ctx.reply(
           "To use live preview, you need an ngrok auth token.\n\n" +
           "1. Sign up at https://ngrok.com (free)\n" +
@@ -300,7 +299,7 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge, tunnelM
 
     // No port: Claude starts the dev server and sets up ngrok
     logUser("[preview] auto-start dev server + ngrok", tag);
-    handlePrompt(chatId, buildPreviewPrompt(), (text) => ctx.reply(text));
+    handlePrompt(chatId, PREVIEW_PROMPT, (text) => ctx.reply(text));
   });
 
   bot.command("close", async (ctx) => {
@@ -689,6 +688,7 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge, tunnelM
     // Check if waiting for ngrok auth token
     const ngrokSetup = pendingNgrokSetup.get(chatId);
     if (ngrokSetup) {
+      clearTimeout(ngrokSetup.timer);
       pendingNgrokSetup.delete(chatId);
       const token = ctx.message.text.trim();
       if (!token) {
@@ -707,7 +707,7 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge, tunnelM
           await openTunnelAndNotify(chatId, ngrokSetup.port);
         } else {
           // No port — Claude starts the dev server + ngrok
-          handlePrompt(chatId, buildPreviewPrompt(), (text) => bot.api.sendMessage(chatId, text));
+          handlePrompt(chatId, PREVIEW_PROMPT, (text) => bot.api.sendMessage(chatId, text));
         }
       })().catch(() => {});
       return;

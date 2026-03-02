@@ -27,6 +27,16 @@ export class TunnelManager {
     this.onAutoClose = cb;
   }
 
+  private createAutoCloseTimer(chatId: number): NodeJS.Timeout {
+    return setTimeout(() => {
+      const entry = this.tunnels.get(chatId);
+      if (entry) {
+        this.closeTunnel(chatId).catch(() => {});
+        this.onAutoClose?.(chatId, entry.port);
+      }
+    }, AUTO_CLOSE_MS);
+  }
+
   async openTunnel(chatId: number, port: number): Promise<string> {
     if (!this.authToken) {
       throw new Error("No ngrok token configured. Run `clautel setup` or set NGROK_AUTH_TOKEN environment variable.");
@@ -45,15 +55,7 @@ export class TunnelManager {
       throw new Error("Failed to get tunnel URL from ngrok.");
     }
 
-    const timer = setTimeout(() => {
-      const entry = this.tunnels.get(chatId);
-      if (entry) {
-        const entryPort = entry.port;
-        this.closeTunnel(chatId).catch(() => {});
-        this.onAutoClose?.(chatId, entryPort);
-      }
-    }, AUTO_CLOSE_MS);
-
+    const timer = this.createAutoCloseTimer(chatId);
     this.tunnels.set(chatId, { url, port, listener, timer });
     return url;
   }
@@ -63,14 +65,7 @@ export class TunnelManager {
     if (!entry) return;
 
     clearTimeout(entry.timer);
-    entry.timer = setTimeout(() => {
-      const current = this.tunnels.get(chatId);
-      if (current) {
-        const entryPort = current.port;
-        this.closeTunnel(chatId).catch(() => {});
-        this.onAutoClose?.(chatId, entryPort);
-      }
-    }, AUTO_CLOSE_MS);
+    entry.timer = this.createAutoCloseTimer(chatId);
   }
 
   async closeTunnel(chatId: number): Promise<boolean> {
@@ -96,7 +91,8 @@ export class TunnelManager {
   }
 
   async closeAll(): Promise<void> {
-    for (const [chatId] of this.tunnels) {
+    const chatIds = [...this.tunnels.keys()];
+    for (const chatId of chatIds) {
       await this.closeTunnel(chatId);
     }
   }
