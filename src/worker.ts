@@ -95,7 +95,7 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge, tunnelM
     "/feedback — Send feedback or report an issue\n" +
     "/help — Show this help message\n\n" +
     "<b>Live Preview:</b>\n" +
-    "/preview &lt;port&gt; — Open live preview tunnel to your dev server\n" +
+    "/preview [port] — Start dev server and open live preview\n" +
     "/close — Close active preview tunnel\n\n" +
     "<b>Features:</b>\n" +
     "• Send documents (PDF, code files, etc.) for analysis\n" +
@@ -237,48 +237,69 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge, tunnelM
   // --- Tunnel commands ---
 
   tunnelManager.setAutoCloseCallback(async (chatId, port) => {
-    await bot.api.sendMessage(chatId, `Preview tunnel for port ${port} closed (30 min inactivity). Use /preview ${port} to reopen.`).catch(() => {});
+    await bot.api.sendMessage(chatId, `Preview tunnel for port ${port} closed (30 min inactivity). Use /preview to reopen.`).catch(() => {});
   });
+
+  async function openTunnelAndNotify(chatId: number, port: number): Promise<void> {
+    try {
+      const url = await tunnelManager.openTunnel(chatId, port);
+      const keyboard = new InlineKeyboard().text("Close Preview", `tunnel:close:${chatId}`);
+      await bot.api.sendMessage(
+        chatId,
+        `Live preview: ${url}\n\nPort ${port}. Open on your phone!`,
+        { reply_markup: keyboard }
+      );
+    } catch (err) {
+      await bot.api.sendMessage(chatId, `Tunnel error: ${(err as Error).message}`);
+    }
+  }
+
+  function buildPreviewPrompt(): string {
+    const tokenPart = config.NGROK_AUTH_TOKEN
+      ? `The ngrok auth token is: ${config.NGROK_AUTH_TOKEN}`
+      : `The ngrok auth token is stored in ${CONFIG_FILE} under the key NGROK_AUTH_TOKEN. Read it from there.`;
+
+    return (
+      "Start the dev server for this project. Install any missing dependencies if needed. " +
+      "If you encounter errors, fix them and retry.\n\n" +
+      "Once the server is running, expose it publicly using ngrok. " +
+      "Install ngrok CLI if it's not already installed (e.g. `brew install ngrok` or `npm install -g ngrok`). " +
+      `${tokenPart}\n\n` +
+      "Run: ngrok http <PORT> (where PORT is the dev server port).\n" +
+      "Share the public ngrok URL in your response so I can open it on my phone."
+    );
+  }
 
   bot.command("preview", async (ctx) => {
     const chatId = ctx.chat.id;
     const arg = ctx.match?.trim();
 
-    if (!arg) {
-      const info = tunnelManager.getTunnelInfo(chatId);
-      if (info) {
-        const keyboard = new InlineKeyboard().text("Close Preview", `tunnel:close:${chatId}`);
-        await ctx.reply(`Active preview: ${info.url}\nPort: ${info.port}`, { reply_markup: keyboard });
-      } else {
-        await ctx.reply("Usage: /preview <port>\nExample: /preview 3000");
+    // Explicit port: bot opens ngrok tunnel directly (fast, no Claude needed)
+    if (arg) {
+      // Check ngrok token for direct tunnel
+      if (!config.NGROK_AUTH_TOKEN) {
+        pendingNgrokSetup.set(chatId, { port: parsePort(arg) || 0 });
+        await ctx.reply(
+          "To use live preview, you need an ngrok auth token.\n\n" +
+          "1. Sign up at https://ngrok.com (free)\n" +
+          "2. Copy your token from: https://dashboard.ngrok.com/get-started/your-authtoken\n\n" +
+          "Paste your token here:"
+        );
+        return;
       }
+
+      const port = parsePort(arg);
+      if (!port) {
+        await ctx.reply("Invalid port. Examples:\n/preview 3000\n/preview localhost:3000");
+        return;
+      }
+      await openTunnelAndNotify(chatId, port);
       return;
     }
 
-    const port = parsePort(arg);
-    if (!port) {
-      await ctx.reply("Invalid port. Examples:\n/preview 3000\n/preview localhost:3000\n/preview http://localhost:3000");
-      return;
-    }
-
-    if (!config.NGROK_AUTH_TOKEN) {
-      pendingNgrokSetup.set(chatId, { port });
-      await ctx.reply(
-        "To use live preview, you need an ngrok auth token.\n\n" +
-        "1. Sign up at https://ngrok.com (free)\n" +
-        "2. Copy your token from: https://dashboard.ngrok.com/get-started/your-authtoken\n\n" +
-        "Paste your token here:"
-      );
-      return;
-    }
-
-    try {
-      const url = await tunnelManager.openTunnel(chatId, port);
-      const keyboard = new InlineKeyboard().text("Close Preview", `tunnel:close:${chatId}`);
-      await ctx.reply(`Live preview: ${url}\n\nOpen this URL on your phone to see your dev server (port ${port}).`, { reply_markup: keyboard });
-    } catch (err) {
-      await ctx.reply(`Tunnel error: ${(err as Error).message}`);
-    }
+    // No port: Claude starts the dev server and sets up ngrok
+    logUser("[preview] auto-start dev server + ngrok", tag);
+    handlePrompt(chatId, buildPreviewPrompt(), (text) => ctx.reply(text));
   });
 
   bot.command("close", async (ctx) => {
@@ -287,7 +308,7 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge, tunnelM
     if (closed) {
       await ctx.reply("Preview tunnel closed.");
     } else {
-      await ctx.reply("No active preview.");
+      await ctx.reply("No active preview. If Claude started ngrok, tell Claude to stop it.");
     }
   });
 
@@ -575,6 +596,7 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge, tunnelM
             `${tokens.toLocaleString()} tokens | ${result.turns} turns | ${seconds}s`
           )
           .catch(() => {});
+
       };
 
       const onError = async (error: Error) => {
@@ -673,26 +695,18 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge, tunnelM
         return;
       }
 
+      // Save token and proceed
       tunnelManager.setAuthToken(token);
+      saveNgrokToken(token);
+      config.NGROK_AUTH_TOKEN = token;
       (async () => {
-        try {
-          const url = await tunnelManager.openTunnel(chatId, ngrokSetup.port);
-          // Token works — persist it
-          saveNgrokToken(token);
-          config.NGROK_AUTH_TOKEN = token;
-          const keyboard = new InlineKeyboard().text("Close Preview", `tunnel:close:${chatId}`);
-          await bot.api.sendMessage(
-            chatId,
-            `Token saved!\n\nLive preview: ${url}\n\nOpen this URL on your phone to see your dev server (port ${ngrokSetup.port}).`,
-            { reply_markup: keyboard }
-          );
-        } catch (err) {
-          // Don't persist bad token — clear so next /preview re-prompts
-          tunnelManager.setAuthToken(undefined);
-          await bot.api.sendMessage(
-            chatId,
-            `Tunnel error: ${(err as Error).message}\n\nCheck your token and try /preview ${ngrokSetup.port} again.`
-          );
+        await bot.api.sendMessage(chatId, "Token saved!");
+        if (ngrokSetup.port) {
+          // Explicit port was given before token prompt
+          await openTunnelAndNotify(chatId, ngrokSetup.port);
+        } else {
+          // No port — Claude starts the dev server + ngrok
+          handlePrompt(chatId, buildPreviewPrompt(), (text) => bot.api.sendMessage(chatId, text));
         }
       })().catch(() => {});
       return;

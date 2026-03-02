@@ -425,9 +425,14 @@ export class ClaudeBridge {
 
       let lastWrittenFilePath: string | null = null;
 
+      // Strip CLAUDECODE env var so the SDK subprocess doesn't refuse to start
+      // when the daemon is launched from within a Claude Code session.
+      const { CLAUDECODE: _, ...cleanEnv } = process.env;
+
       const q = query({
         prompt,
         options: {
+          env: cleanEnv,
           cwd: this.workingDir,
           model,
           includePartialMessages: true,
@@ -641,6 +646,7 @@ export class ClaudeBridge {
               new Error(errors?.join(", ") || "Claude query failed")
             );
           }
+          break; // Result is the final message — exit immediately so the bot is ready for new requests
         }
       }
     } catch (error) {
