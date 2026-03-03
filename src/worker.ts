@@ -19,6 +19,7 @@ const CONFIG_FILE = path.join(DATA_DIR, "config.json");
 
 const TYPING_INTERVAL_MS = 4000;
 const EDIT_DEBOUNCE_MS = 1500;
+const DRAFT_DEBOUNCE_MS = 300; // Faster updates for sendMessageDraft (no flicker)
 const APPROVAL_TIMEOUT_MS = 2 * 60 * 60 * 1000; // 2 hours — users interact async on mobile
 const FETCH_TIMEOUT_MS = 30_000;
 const MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024; // 20 MB
@@ -351,8 +352,22 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge, tunnelM
 
       await bot.api.sendChatAction(chatId, "typing");
 
-      const thinking = await replyFn("Thinking...");
-      const thinkingMsgId = thinking.message_id;
+      // Draft streaming state
+      let draftId = 1;
+      let draftSupported = true;
+      let draftActive = false;
+      let thinkingMsgId: number | null = null;
+
+      // Try sendMessageDraft first (smooth animated streaming, DM-only)
+      try {
+        await bot.api.sendMessageDraft(chatId, draftId, "Thinking...");
+        draftActive = true;
+      } catch {
+        // Draft not supported (group chat, old client) — fall back to editMessageText
+        draftSupported = false;
+        const thinking = await replyFn("Thinking...");
+        thinkingMsgId = thinking.message_id;
+      }
 
       const typingInterval = setInterval(() => {
         bot.api.sendChatAction(chatId, "typing").catch(() => {});
@@ -371,47 +386,71 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge, tunnelM
         }
         lastEditTime = Date.now();
 
-        let content: string;
-        const footer = currentActivity ? `\n\n<i>${currentActivity}</i>` : "";
+        // Build plain text content (used for drafts and as fallback)
+        const plainFooter = currentActivity ? `\n\n${currentActivity}` : "";
+        let plainContent: string;
+        if (buffer.trim()) {
+          const maxLen = STREAM_MAX_LEN - plainFooter.length;
+          const text = buffer.length > maxLen ? buffer.slice(0, maxLen) + "\n\n... streaming ..." : buffer;
+          plainContent = text + plainFooter;
+        } else {
+          plainContent = (plainFooter.trim() || "Thinking...").trim();
+        }
 
+        if (!plainContent.trim() || plainContent === lastEditedText) return;
+        lastEditedText = plainContent;
+
+        // Draft path: smooth animated streaming via sendMessageDraft
+        if (draftSupported && draftActive) {
+          try {
+            await bot.api.sendMessageDraft(chatId, draftId, plainContent);
+            return;
+          } catch {
+            // Draft failed mid-stream — fall back permanently for this request
+            draftSupported = false;
+            draftActive = false;
+            const msg = await replyFn(plainContent);
+            thinkingMsgId = msg.message_id;
+            return;
+          }
+        }
+
+        // Fallback path: editMessageText with HTML
+        if (!thinkingMsgId) return;
+        const htmlFooter = currentActivity ? `\n\n<i>${currentActivity}</i>` : "";
+        let htmlContent: string;
         if (buffer.trim()) {
           let html = claudeToTelegram(buffer);
-          const maxLen = STREAM_MAX_LEN - footer.length;
+          const maxLen = STREAM_MAX_LEN - htmlFooter.length;
           if (html.length > maxLen) {
             html = html.slice(0, maxLen) + "\n\n<i>... streaming ...</i>";
           }
-          content = html + footer;
+          htmlContent = html + htmlFooter;
         } else {
-          content = footer.trim() || "<i>Thinking...</i>";
+          htmlContent = htmlFooter.trim() || "<i>Thinking...</i>";
         }
 
-        if (!content.trim() || content === lastEditedText) return;
-        lastEditedText = content;
-
         try {
-          await bot.api.editMessageText(chatId, thinkingMsgId, content, {
+          await bot.api.editMessageText(chatId, thinkingMsgId, htmlContent, {
             parse_mode: "HTML",
           });
         } catch {
           try {
-            const plain = buffer.trim()
-              ? (buffer.length > STREAM_MAX_LEN ? buffer.slice(0, STREAM_MAX_LEN) + "\n\n... streaming ..." : buffer) +
-                (currentActivity ? `\n\n${currentActivity}` : "")
-              : currentActivity || "Thinking...";
-            if (plain !== lastEditedText) {
-              lastEditedText = plain;
-              await bot.api.editMessageText(chatId, thinkingMsgId, plain);
+            if (plainContent !== lastEditedText) {
+              lastEditedText = plainContent;
+              await bot.api.editMessageText(chatId, thinkingMsgId, plainContent);
             }
           } catch {}
         }
       };
 
       const scheduleEdit = () => {
+        const debounce = (draftSupported && draftActive) ? DRAFT_DEBOUNCE_MS : EDIT_DEBOUNCE_MS;
         const now = Date.now();
-        if (now - lastEditTime >= EDIT_DEBOUNCE_MS) {
+        if (now - lastEditTime >= debounce) {
           doEdit();
         } else if (!editTimer) {
-          editTimer = setTimeout(doEdit, EDIT_DEBOUNCE_MS - (now - lastEditTime));
+          editTimer = setTimeout(doEdit, debounce - (now - lastEditTime));
         }
       };
 
@@ -433,11 +472,17 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge, tunnelM
           editTimer = null;
         }
 
-        // Save preamble before clearing buffer, then stabilise thinkingMsgId immediately
+        // Save preamble before clearing buffer
         const preamble = buffer.trim();
         buffer = "";
         currentActivity = "";
-        await doEdit();
+
+        // Update display to show waiting state
+        if (draftActive) {
+          await bot.api.sendMessageDraft(chatId, draftId, "Waiting for plan approval...").catch(() => {});
+        } else {
+          await doEdit();
+        }
 
         // Combine preamble with the plan file Claude wrote
         const planBody = planFileContent?.trim() ?? "";
@@ -463,7 +508,7 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge, tunnelM
           .row()
           .text("Reject Plan", `plan:reject:${requestId}`);
 
-        return new Promise((resolve) => {
+        const approved = await new Promise<boolean>((resolve) => {
           const timer = setTimeout(() => {
             pendingPlanActions.delete(requestId);
             resolve(false);
@@ -482,6 +527,10 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge, tunnelM
               resolve(false);
             });
         });
+
+        // Fresh draft ID for the next streaming segment after approval
+        if (draftActive) draftId++;
+        return approved;
       };
 
       const onAskUser = async (questions: AskUserQuestion[]): Promise<Record<string, string>> => {
@@ -579,12 +628,17 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge, tunnelM
         const html = claudeToTelegram(finalText);
         const parts = splitMessage(html);
 
-        try {
-          await bot.api.deleteMessage(chatId, thinkingMsgId);
-        } catch {
-          await bot.api
-            .editMessageText(chatId, thinkingMsgId, "⏤")
-            .catch(() => {});
+        if (draftActive) {
+          // Draft disappears naturally when we send the final message(s)
+          draftActive = false;
+        } else if (thinkingMsgId) {
+          try {
+            await bot.api.deleteMessage(chatId, thinkingMsgId);
+          } catch {
+            await bot.api
+              .editMessageText(chatId, thinkingMsgId, "⏤")
+              .catch(() => {});
+          }
         }
 
         for (const part of parts) {
@@ -620,14 +674,26 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge, tunnelM
         const retryId = String(++retryCounter);
         const keyboard = new InlineKeyboard().text("Retry", `retry:${retryId}`);
 
-        try {
-          await bot.api.editMessageText(
-            chatId,
-            thinkingMsgId,
-            `Error: ${error.message}`,
-            { reply_markup: keyboard }
-          );
-        } catch {
+        if (draftActive) {
+          // Drafts can't have inline keyboards — send error as a new message
+          draftActive = false;
+          await bot.api.sendMessage(chatId, `Error: ${error.message}`, {
+            reply_markup: keyboard,
+          }).catch(() => {});
+        } else if (thinkingMsgId) {
+          try {
+            await bot.api.editMessageText(
+              chatId,
+              thinkingMsgId,
+              `Error: ${error.message}`,
+              { reply_markup: keyboard }
+            );
+          } catch {
+            await bot.api.sendMessage(chatId, `Error: ${error.message}`, {
+              reply_markup: keyboard,
+            }).catch(() => {});
+          }
+        } else {
           await bot.api.sendMessage(chatId, `Error: ${error.message}`, {
             reply_markup: keyboard,
           }).catch(() => {});
@@ -648,10 +714,15 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge, tunnelM
       if (!responseHandled) {
         clearInterval(typingInterval);
         if (editTimer) clearTimeout(editTimer);
-        try {
-          await bot.api.deleteMessage(chatId, thinkingMsgId);
-        } catch {
-          await bot.api.editMessageText(chatId, thinkingMsgId, "Cancelled.").catch(() => {});
+        if (draftActive) {
+          // Draft disappears; send "Cancelled." as a real message
+          await bot.api.sendMessage(chatId, "Cancelled.").catch(() => {});
+        } else if (thinkingMsgId) {
+          try {
+            await bot.api.deleteMessage(chatId, thinkingMsgId);
+          } catch {
+            await bot.api.editMessageText(chatId, thinkingMsgId, "Cancelled.").catch(() => {});
+          }
         }
       }
     })().catch((err) => {
