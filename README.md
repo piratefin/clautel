@@ -163,4 +163,20 @@ MIT. See [LICENSE](LICENSE) for full terms.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, code style, and PR guidelines.
+Contributions are welcome! Here's how to get started:
+
+```bash
+git clone https://github.com/AnasNadeem/clautel.git
+cd clautel
+npm install
+npm run build
+npm test          # all 55 tests should pass
+```
+
+To run locally during development:
+
+```bash
+npm run dev       # watch mode with auto-restart
+```
+
+Then open a PR against `main`. See [CONTRIBUTING.md](CONTRIBUTING.md) for code style, project structure, and full guidelines.
