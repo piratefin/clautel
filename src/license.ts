@@ -240,7 +240,10 @@ export function loadLicense(): LicenseState {
     const { checksum, ...rest } = raw as LicenseState;
 
     const expected = computeChecksum(rest);
-    if (checksum === expected) return raw as LicenseState;
+    if (typeof checksum === "string" && checksum.length === expected.length &&
+        crypto.timingSafeEqual(Buffer.from(checksum), Buffer.from(expected))) {
+      return raw as LicenseState;
+    }
 
     // Checksum mismatch — tampered or corrupted
     const expired = defaultLicenseState();

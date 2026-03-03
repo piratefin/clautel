@@ -385,7 +385,7 @@ ${envEntries.join("\n")}
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
 
-  fs.writeFileSync(getPlistPath(), plist);
+  fs.writeFileSync(getPlistPath(), plist, { mode: 0o600 });
 
   const load = spawn("launchctl", ["load", getPlistPath()], { stdio: "inherit" });
   load.on("close", (code) => {
