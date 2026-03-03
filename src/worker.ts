@@ -13,20 +13,32 @@ import {
 } from "./formatter.js";
 import type { AskUserQuestion } from "./claude.js";
 import { logUser, logStream, logResult, logError } from "./log.js";
-import { checkLicenseForQuery, getPaymentUrl, detectClaudePlan, LICENSE_CANARY } from "./license.js";
+import { checkLicenseForQuery, getPaymentUrl, detectClaudePlan } from "./license.js";
 
 const CONFIG_FILE = path.join(DATA_DIR, "config.json");
-
-// Cross-module integrity: verify license module hasn't been patched
-if (LICENSE_CANARY !== "L1c3ns3-Ch3ck-V2") {
-  throw new Error("Integrity check failed: license module has been tampered with.");
-}
 
 const TYPING_INTERVAL_MS = 4000;
 const EDIT_DEBOUNCE_MS = 1500;
 const APPROVAL_TIMEOUT_MS = 2 * 60 * 60 * 1000; // 2 hours — users interact async on mobile
 const FETCH_TIMEOUT_MS = 30_000;
 const MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024; // 20 MB
+
+async function downloadTelegramFile(token: string, filePath: string): Promise<Buffer> {
+  const url = `https://api.telegram.org/file/bot${token}/${filePath}`;
+  const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+  if (!res.ok) throw new Error(`Telegram file download failed: HTTP ${res.status}`);
+
+  const contentLength = Number(res.headers.get("content-length") || 0);
+  if (contentLength > MAX_DOWNLOAD_BYTES) {
+    throw new Error(`File too large (${(contentLength / 1024 / 1024).toFixed(1)} MB). Max is ${MAX_DOWNLOAD_BYTES / 1024 / 1024} MB.`);
+  }
+
+  const buffer = Buffer.from(await res.arrayBuffer());
+  if (buffer.length > MAX_DOWNLOAD_BYTES) {
+    throw new Error(`File too large (${(buffer.length / 1024 / 1024).toFixed(1)} MB). Max is ${MAX_DOWNLOAD_BYTES / 1024 / 1024} MB.`);
+  }
+  return buffer;
+}
 const REPLY_PREVIEW_MAX = 500;
 const STREAM_MAX_LEN = 4000;
 const FEEDBACK_FORM_URL = "https://forms.gle/5r3j1uqK4YP7KWSA9";
@@ -86,8 +98,8 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge, tunnelM
   const repoName = path.basename(botConfig.workingDir);
 
   const helpText =
-    `<b>${repoName}</b>\n` +
-    `<code>${botConfig.workingDir}</code>\n\n` +
+    `<b>${escapeHtml(repoName)}</b>\n` +
+    `<code>${escapeHtml(botConfig.workingDir)}</code>\n\n` +
     "Send any text or photo to interact with Claude Code.\n\n" +
     "<b>Commands:</b>\n" +
     "/new — Start a fresh session (clears context)\n" +
@@ -747,21 +759,25 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge, tunnelM
     }
 
     const file = await ctx.api.getFile(doc.file_id);
-    const fileUrl = `https://api.telegram.org/file/bot${botConfig.token}/${file.file_path}`;
-
-    const tmpDir = bridge.getTempDir();
-    fs.mkdirSync(tmpDir, { recursive: true });
-    const fileName = doc.file_name || `file-${Date.now()}`;
-    const tmpFile = path.join(tmpDir, fileName);
-
-    const res = await fetch(fileUrl, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
-    const contentLength = Number(res.headers.get("content-length") || 0);
-    if (contentLength > MAX_DOWNLOAD_BYTES) {
-      await ctx.reply(`File too large (${(contentLength / 1024 / 1024).toFixed(1)} MB). Max is ${MAX_DOWNLOAD_BYTES / 1024 / 1024} MB.`);
+    if (!file.file_path) {
+      await ctx.reply("Error: Could not get file path from Telegram.");
       return;
     }
-    const arrayBuf = Buffer.from(await res.arrayBuffer());
-    fs.writeFileSync(tmpFile, arrayBuf);
+
+    const tmpDir = bridge.getTempDir();
+    fs.mkdirSync(tmpDir, { recursive: true, mode: 0o700 });
+    const rawName = doc.file_name || `file-${Date.now()}`;
+    const fileName = path.basename(rawName).replace(/[^a-zA-Z0-9._-]/g, "_");
+    const tmpFile = path.join(tmpDir, fileName);
+
+    let arrayBuf: Buffer;
+    try {
+      arrayBuf = await downloadTelegramFile(botConfig.token, file.file_path);
+    } catch (err) {
+      await ctx.reply((err as Error).message);
+      return;
+    }
+    fs.writeFileSync(tmpFile, arrayBuf, { mode: 0o600 });
 
     const caption = ctx.message.caption || `Analyze this file: ${fileName}`;
     logUser(`[document: ${fileName}] ${caption}`, tag);
@@ -787,21 +803,24 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge, tunnelM
     }
 
     const file = await ctx.api.getFile(photo.file_id);
-    const fileUrl = `https://api.telegram.org/file/bot${botConfig.token}/${file.file_path}`;
+    if (!file.file_path) {
+      await ctx.reply("Error: Could not get file path from Telegram.");
+      return;
+    }
 
     const tmpDir = bridge.getTempDir();
-    fs.mkdirSync(tmpDir, { recursive: true });
+    fs.mkdirSync(tmpDir, { recursive: true, mode: 0o700 });
     const ext = path.extname(file.file_path || ".jpg") || ".jpg";
     const tmpFile = path.join(tmpDir, `tg-${Date.now()}${ext}`);
 
-    const res = await fetch(fileUrl, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
-    const contentLength = Number(res.headers.get("content-length") || 0);
-    if (contentLength > MAX_DOWNLOAD_BYTES) {
-      await ctx.reply(`Photo too large (${(contentLength / 1024 / 1024).toFixed(1)} MB). Max is ${MAX_DOWNLOAD_BYTES / 1024 / 1024} MB.`);
+    let arrayBuf: Buffer;
+    try {
+      arrayBuf = await downloadTelegramFile(botConfig.token, file.file_path);
+    } catch (err) {
+      await ctx.reply((err as Error).message);
       return;
     }
-    const arrayBuf = Buffer.from(await res.arrayBuffer());
-    fs.writeFileSync(tmpFile, arrayBuf);
+    fs.writeFileSync(tmpFile, arrayBuf, { mode: 0o600 });
 
     const caption = ctx.message.caption || "Describe this image.";
     logUser(`[photo] ${caption}`, tag);
@@ -847,6 +866,11 @@ export function createWorker(botConfig: BotConfig, bridge: ClaudeBridge, tunnelM
     const resumeMatch = data.match(/^resume:(.+)$/);
     if (resumeMatch) {
       const sessionId = resumeMatch[1];
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (!uuidRegex.test(sessionId)) {
+        await ctx.answerCallbackQuery("Invalid session ID").catch(() => {});
+        return;
+      }
       const chatId = ctx.chat!.id;
 
       if (bridge.isProcessing(chatId)) {

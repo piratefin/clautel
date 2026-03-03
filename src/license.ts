@@ -63,10 +63,6 @@ function getIntegrityKey(): Buffer {
   return newKey;
 }
 
-// --- Canary ---
-// Cross-module integrity check: other modules verify this value at load/startup
-export const LICENSE_CANARY = "L1c3ns3-Ch3ck-V2";
-
 // --- Types ---
 
 interface SignedToken {
@@ -244,7 +240,10 @@ export function loadLicense(): LicenseState {
     const { checksum, ...rest } = raw as LicenseState;
 
     const expected = computeChecksum(rest);
-    if (checksum === expected) return raw as LicenseState;
+    if (typeof checksum === "string" && checksum.length === expected.length &&
+        crypto.timingSafeEqual(Buffer.from(checksum), Buffer.from(expected))) {
+      return raw as LicenseState;
+    }
 
     // Checksum mismatch — tampered or corrupted
     const expired = defaultLicenseState();

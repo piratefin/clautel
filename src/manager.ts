@@ -3,6 +3,7 @@ import { Bot } from "grammy";
 import { config } from "./config.js";
 import type { BotConfig } from "./store.js";
 import { getLicenseInfo, getPaymentUrl, getCustomerPortalUrl, detectClaudePlan, getPlanLabel, getLicensePlan, getBotLimit } from "./license.js";
+import { escapeHtml } from "./formatter.js";
 
 export interface ManagerCallbacks {
   startWorker: (botConfig: BotConfig) => Promise<void>;
@@ -62,7 +63,7 @@ export function createManager(callbacks: ManagerCallbacks): Bot {
 
     const lines: string[] = [];
     for (const [, w] of workers) {
-      lines.push(`• @${w.config.username} — <code>${w.config.workingDir}</code>`);
+      lines.push(`• @${escapeHtml(w.config.username)} — <code>${escapeHtml(w.config.workingDir)}</code>`);
     }
     return lines.join("\n");
   }
@@ -235,7 +236,8 @@ export function createManager(callbacks: ManagerCallbacks): Bot {
       await callbacks.stopWorker(foundId);
       await ctx.reply(`Removed @${arg}. Bot stopped.`);
     } catch (err) {
-      await ctx.reply(`Error removing @${arg}: ${err}`);
+      console.error(`[manager] Remove @${arg} failed:`, (err as Error).message);
+      await ctx.reply(`Error removing @${arg}. Check logs for details.`);
     }
   });
 
@@ -245,14 +247,14 @@ export function createManager(callbacks: ManagerCallbacks): Bot {
     dir: string
   ): Promise<void> {
     if (!fs.existsSync(dir)) {
-      await ctx.reply(`Path does not exist: <code>${dir}</code>`, {
+      await ctx.reply(`Path does not exist: <code>${escapeHtml(dir)}</code>`, {
         parse_mode: "HTML",
       });
       return;
     }
 
     if (!fs.statSync(dir).isDirectory()) {
-      await ctx.reply(`Path is not a directory: <code>${dir}</code>`, {
+      await ctx.reply(`Path is not a directory: <code>${escapeHtml(dir)}</code>`, {
         parse_mode: "HTML",
       });
       return;
@@ -281,7 +283,8 @@ export function createManager(callbacks: ManagerCallbacks): Bot {
       const me = await tempBot.api.getMe();
       botInfo = { id: me.id, username: me.username || `bot_${me.id}` };
     } catch (err) {
-      await ctx.reply(`Invalid bot token. Error: ${err}`);
+      console.error("[manager] Token validation failed:", (err as Error).message);
+      await ctx.reply("Invalid bot token. Check it and try again.");
       return;
     }
 
@@ -303,13 +306,14 @@ export function createManager(callbacks: ManagerCallbacks): Bot {
     try {
       await callbacks.startWorker(botConfig);
       await ctx.reply(
-        `Added @${botInfo.username}\n` +
-          `Repo: <code>${dir}</code>\n\n` +
-          `DM @${botInfo.username} to start working!`,
+        `Added @${escapeHtml(botInfo.username)}\n` +
+          `Repo: <code>${escapeHtml(dir)}</code>\n\n` +
+          `DM @${escapeHtml(botInfo.username)} to start working!`,
         { parse_mode: "HTML" }
       );
     } catch (err) {
-      await ctx.reply(`Failed to start worker: ${err}`);
+      console.error("[manager] Worker start failed:", (err as Error).message);
+      await ctx.reply("Failed to start worker. Check logs for details.");
     }
   }
 
