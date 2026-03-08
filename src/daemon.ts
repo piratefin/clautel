@@ -55,20 +55,38 @@ async function startWorker(botConfig: BotConfig): Promise<void> {
   addBot(botConfig);
   activeWorkers.set(botConfig.id, { config: botConfig, bot, bridge, tunnelManager });
 
-  // Cancel any lingering getUpdates sessions from a previous crashed instance
-  await bot.api.deleteWebhook({ drop_pending_updates: false });
+  // Fire-and-forget: polling runs in background with 409 retry logic.
+  // When a previous instance's getUpdates long-poll is still alive (up to 30s timeout),
+  // Telegram returns 409 Conflict. We retry with backoff, waiting long enough for it to expire.
+  const startPolling = async () => {
+    const MAX_RETRIES = 3;
+    const RETRY_DELAY_MS = 15_000; // 15s × 1, 15s × 2 = 45s total window (> 30s poll timeout)
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        await bot.start();
+        return;
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes("409") && attempt < MAX_RETRIES) {
+          const wait = RETRY_DELAY_MS * attempt;
+          console.log(`[${botConfig.username}] 409 Conflict (attempt ${attempt}/${MAX_RETRIES}), retrying in ${wait / 1000}s...`);
+          await new Promise((r) => setTimeout(r, wait));
+          continue;
+        }
+        throw err;
+      }
+    }
+  };
 
-  // Fire-and-forget: polling runs in background
-  // On error, clean up properly and remove from activeWorkers (kept in bots.json so health check restarts it)
-  bot.start().catch((err: Error) => {
-    console.error(`[${botConfig.username}] Polling error:`, err.message);
+  console.log(`Worker started: @${botConfig.username} → ${botConfig.workingDir}`);
+  startPolling().catch((err: unknown) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[${botConfig.username}] Polling error:`, msg);
     bridge.abortAll();
     try { bot.stop(); } catch {}
     activeWorkers.delete(botConfig.id);
     lastWorkerError.set(botConfig.id, Date.now());
   });
-
-  console.log(`Worker started: @${botConfig.username} → ${botConfig.workingDir}`);
 }
 
 async function stopWorker(botId: number): Promise<void> {
@@ -186,17 +204,32 @@ async function main() {
     }
   }, HEALTH_CHECK_INTERVAL_MS);
 
-  // Cancel any lingering getUpdates sessions from a previous crashed instance
-  await managerBot.api.deleteWebhook({ drop_pending_updates: false });
-
-  // Start manager bot polling — keeps the process alive
-  await managerBot.start({
-    onStart: (info) => {
-      console.log(`Manager bot: @${info.username}`);
-      console.log(`Active workers: ${activeWorkers.size}`);
-      console.log(`\nReady! DM @${info.username} to manage bots`);
-    },
-  });
+  // Start manager bot polling with 409 retry logic.
+  // When launchd restarts the daemon after a crash, the previous Telegram
+  // long-poll session may still be alive for up to 30s → 409 Conflict.
+  const MAX_RETRIES = 3;
+  const RETRY_DELAY_MS = 15_000; // 15s × 1, 15s × 2 = 45s total window (> 30s poll timeout)
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      await managerBot.start({
+        onStart: (info) => {
+          console.log(`Manager bot: @${info.username}`);
+          console.log(`Active workers: ${activeWorkers.size}`);
+          console.log(`\nReady! DM @${info.username} to manage bots`);
+        },
+      });
+      break; // bot.start() resolved means bot stopped gracefully
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("409") && attempt < MAX_RETRIES) {
+        const wait = RETRY_DELAY_MS * attempt;
+        console.log(`[manager] 409 Conflict (attempt ${attempt}/${MAX_RETRIES}), retrying in ${wait / 1000}s...`);
+        await new Promise((r) => setTimeout(r, wait));
+        continue;
+      }
+      throw err; // non-409 or final attempt — let main().catch() handle it
+    }
+  }
 }
 
 const shutdown = async () => {

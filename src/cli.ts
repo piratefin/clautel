@@ -596,7 +596,7 @@ async function installLaunchdService(): Promise<void> {
   <key>KeepAlive</key>
   <true/>
   <key>ThrottleInterval</key>
-  <integer>15</integer>
+  <integer>35</integer>
   <key>StandardOutPath</key>
   <string>${LOG_FILE}</string>
   <key>StandardErrorPath</key>
