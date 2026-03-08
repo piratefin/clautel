@@ -79,9 +79,12 @@ function startDirect(): void {
   const logFd = fs.openSync(LOG_FILE, "a");
 
   const [cmd, args] = DAEMON_CMD;
+  const isWin = process.platform === "win32";
   const child = spawn(cmd, args, {
     detached: true,
     stdio: ["ignore", logFd, logFd],
+    // Windows: shell needed for .cmd scripts (npx), windowsHide suppresses console
+    ...(isWin && { shell: true, windowsHide: true }),
   });
 
   child.unref();
@@ -358,10 +361,35 @@ function cmdLogs(): void {
     return;
   }
 
-  const tail = spawn("tail", ["-n", "50", "-f", LOG_FILE], { stdio: "inherit" });
+  // Cross-platform log tailing (no dependency on Unix `tail`)
+  const content = fs.readFileSync(LOG_FILE, "utf-8");
+  const lines = content.split("\n");
+  const last50 = lines.slice(-51).join("\n"); // -51 because last element may be empty
+  process.stdout.write(last50);
+  if (!last50.endsWith("\n")) process.stdout.write("\n");
+
+  // Follow mode: watch for changes and print new content
+  let position = fs.statSync(LOG_FILE).size;
+  const watcher = fs.watch(LOG_FILE, () => {
+    try {
+      const stat = fs.statSync(LOG_FILE);
+      if (stat.size < position) {
+        // File was truncated (log rotation) — reset
+        position = 0;
+      }
+      if (stat.size > position) {
+        const fd = fs.openSync(LOG_FILE, "r");
+        const buf = Buffer.alloc(stat.size - position);
+        fs.readSync(fd, buf, 0, buf.length, position);
+        fs.closeSync(fd);
+        process.stdout.write(buf);
+        position = stat.size;
+      }
+    } catch {}
+  });
 
   process.on("SIGINT", () => {
-    tail.kill();
+    watcher.close();
     process.exit(0);
   });
 }
