@@ -60,6 +60,38 @@ function readPid(): number | null {
   }
 }
 
+function launchctlExec(args: string[]): Promise<{ code: number; stderr: string }> {
+  return new Promise((resolve) => {
+    let stderr = "";
+    const child = spawn("launchctl", args, {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    child.stderr.on("data", (data: Buffer) => { stderr += data.toString(); });
+    child.on("close", (code) => resolve({ code: code ?? 1, stderr }));
+    child.on("error", (err) => resolve({ code: 1, stderr: err.message }));
+  });
+}
+
+function startDirect(): void {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  rotateLog();
+
+  const logFd = fs.openSync(LOG_FILE, "a");
+
+  const [cmd, args] = DAEMON_CMD;
+  const child = spawn(cmd, args, {
+    detached: true,
+    stdio: ["ignore", logFd, logFd],
+  });
+
+  child.unref();
+  fs.closeSync(logFd);
+  fs.writeFileSync(PID_FILE, String(child.pid));
+
+  console.log(`Started (PID ${child.pid})`);
+  console.log(`Logs: clautel logs`);
+}
+
 async function cmdSetup(): Promise<void> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   const ask = (q: string): Promise<string> =>
@@ -221,15 +253,47 @@ async function cmdStart(): Promise<void> {
 
   // On macOS with launchd service installed, use launchctl to start
   if (process.platform === "darwin" && fs.existsSync(getPlistPath())) {
-    const load = spawn("launchctl", ["load", getPlistPath()], { stdio: "inherit" });
-    load.on("close", (code) => {
-      if (code === 0) {
-        console.log("Started via launchd.");
-        console.log(`Logs: clautel logs`);
+    // Unload stale service first — fixes "Load failed: 5: Input/output error"
+    // which occurs when the plist is already loaded from a previous session
+    await launchctlExec(["unload", getPlistPath()]);
+
+    const { code, stderr } = await launchctlExec(["load", getPlistPath()]);
+
+    // launchctl can exit 0 even on failure (macOS quirk) — check stderr too
+    const loadFailed = code !== 0 || stderr.includes("Load failed");
+
+    if (loadFailed) {
+      console.error(`launchd: ${stderr.trim() || `exit code ${code}`}`);
+      console.log("Starting directly instead...");
+      startDirect();
+      return;
+    }
+
+    // Give the daemon a moment to start and write its PID file
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+
+    const newPid = readPid();
+    if (newPid && isRunning(newPid)) {
+      console.log(`Started via launchd (PID ${newPid})`);
+      console.log(`Logs: clautel logs`);
+    } else {
+      // Daemon didn't start — show diagnostics and fall back to direct
+      console.error("Daemon did not start via launchd.");
+      if (fs.existsSync(LOG_FILE)) {
+        const content = fs.readFileSync(LOG_FILE, "utf-8").trim();
+        if (content) {
+          const lines = content.split("\n").slice(-5);
+          console.error("Recent logs:\n  " + lines.join("\n  "));
+        }
       } else {
-        console.error("Failed to start service via launchctl.");
+        console.error("No log file — daemon crashed before writing output.");
+        console.error("Run manually to see errors:");
+        console.error(`  ${DAEMON_CMD[0]} ${DAEMON_CMD[1].join(" ")}`);
       }
-    });
+      console.log("\nFalling back to direct start...");
+      await launchctlExec(["unload", getPlistPath()]);
+      startDirect();
+    }
     return;
   }
 
@@ -240,46 +304,29 @@ async function cmdStart(): Promise<void> {
     return;
   }
 
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  rotateLog();
-
-  const logFd = fs.openSync(LOG_FILE, "a");
-
-  const [cmd, args] = DAEMON_CMD;
-  const child = spawn(cmd, args, {
-    detached: true,
-    stdio: ["ignore", logFd, logFd],
-  });
-
-  child.unref();
-  fs.closeSync(logFd);
-  fs.writeFileSync(PID_FILE, String(child.pid));
-
-  console.log(`Started (PID ${child.pid})`);
-  console.log(`Logs: clautel logs`);
+  startDirect();
 }
 
-function cmdStop(): void {
+async function cmdStop(): Promise<void> {
   // On macOS with launchd service installed, use launchctl to unload so
   // KeepAlive doesn't immediately restart the daemon
   if (process.platform === "darwin" && fs.existsSync(getPlistPath())) {
     const pid = readPid();
-    const unload = spawn("launchctl", ["unload", getPlistPath()], { stdio: "inherit" });
-    unload.on("close", (code) => {
-      if (code === 0) {
+    const { code } = await launchctlExec(["unload", getPlistPath()]);
+    if (code === 0) {
+      fs.rmSync(PID_FILE, { force: true });
+      console.log("Stopped (launchd service unloaded).");
+    } else {
+      // Fall back to SIGTERM if launchctl fails
+      if (pid && isRunning(pid)) {
+        process.kill(pid, "SIGTERM");
         fs.rmSync(PID_FILE, { force: true });
-        console.log("Stopped (launchd service unloaded).");
+        console.log(`Stopped (PID ${pid})`);
       } else {
-        // Fall back to SIGTERM if launchctl fails
-        if (pid && isRunning(pid)) {
-          process.kill(pid, "SIGTERM");
-          fs.rmSync(PID_FILE, { force: true });
-          console.log(`Stopped (PID ${pid})`);
-        } else {
-          console.error("Failed to stop service via launchctl.");
-        }
+        fs.rmSync(PID_FILE, { force: true });
+        console.log("Not running.");
       }
-    });
+    }
     return;
   }
 
@@ -378,25 +425,48 @@ ${envEntries.join("\n")}
   const agentsDir = path.dirname(getPlistPath());
   fs.mkdirSync(agentsDir, { recursive: true });
 
-  // Unload existing service if present (for clean reinstall)
+  // Unload existing service if present (properly awaited for clean reinstall)
   if (fs.existsSync(getPlistPath())) {
-    try { spawn("launchctl", ["unload", getPlistPath()], { stdio: "ignore" }).unref(); } catch {}
-    // Brief wait for unload to complete
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    await launchctlExec(["unload", getPlistPath()]);
   }
 
   fs.writeFileSync(getPlistPath(), plist, { mode: 0o600 });
 
-  const load = spawn("launchctl", ["load", getPlistPath()], { stdio: "inherit" });
-  load.on("close", (code) => {
-    if (code === 0) {
-      console.log("Service installed and started.");
-      console.log(`Plist: ${getPlistPath()}`);
-      console.log("The daemon will auto-restart on crash and start at login.");
+  const { code, stderr } = await launchctlExec(["load", getPlistPath()]);
+  const loadFailed = code !== 0 || stderr.includes("Load failed");
+
+  if (loadFailed) {
+    console.error(`launchd: ${stderr.trim() || `exit code ${code}`}`);
+    console.log("Starting daemon directly instead...");
+    startDirect();
+    return;
+  }
+
+  // Give the daemon a moment to start and write its PID file
+  await new Promise((resolve) => setTimeout(resolve, 2000));
+
+  const newPid = readPid();
+  if (newPid && isRunning(newPid)) {
+    console.log("Service installed and started.");
+    console.log(`Plist: ${getPlistPath()}`);
+    console.log("The daemon will auto-restart on crash and start at login.");
+  } else {
+    console.error("Service installed but daemon did not start.");
+    if (fs.existsSync(LOG_FILE)) {
+      const content = fs.readFileSync(LOG_FILE, "utf-8").trim();
+      if (content) {
+        const lines = content.split("\n").slice(-5);
+        console.error("Recent logs:\n  " + lines.join("\n  "));
+      }
     } else {
-      console.error("Failed to load service. Check: launchctl list | grep claude");
+      console.error("No log file — daemon crashed before writing output.");
+      console.error("Run manually to see errors:");
+      console.error(`  ${DAEMON_CMD[0]} ${DAEMON_CMD[1].join(" ")}`);
     }
-  });
+    console.log("\nFalling back to direct start...");
+    await launchctlExec(["unload", getPlistPath()]);
+    startDirect();
+  }
 }
 
 function cmdUninstallService(): void {
@@ -590,7 +660,7 @@ switch (command) {
     cmdStart().catch((err) => { console.error(err); process.exit(1); });
     break;
   case "stop":
-    cmdStop();
+    cmdStop().catch((err) => { console.error(err); process.exit(1); });
     break;
   case "status":
     cmdStatus();
