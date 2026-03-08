@@ -60,16 +60,37 @@ function readPid(): number | null {
   }
 }
 
-function launchctlExec(args: string[]): Promise<{ code: number; stderr: string }> {
+function spawnExec(cmd: string, args: string[]): Promise<{ code: number; stderr: string }> {
   return new Promise((resolve) => {
     let stderr = "";
-    const child = spawn("launchctl", args, {
+    const child = spawn(cmd, args, {
       stdio: ["ignore", "ignore", "pipe"],
     });
     child.stderr.on("data", (data: Buffer) => { stderr += data.toString(); });
     child.on("close", (code) => resolve({ code: code ?? 1, stderr }));
     child.on("error", (err) => resolve({ code: 1, stderr: err.message }));
   });
+}
+
+function launchctlExec(args: string[]): Promise<{ code: number; stderr: string }> {
+  return spawnExec("launchctl", args);
+}
+
+function systemctlExec(args: string[]): Promise<{ code: number; stderr: string }> {
+  return spawnExec("systemctl", ["--user", ...args]);
+}
+
+function hasSystemd(): boolean {
+  try {
+    fs.accessSync("/run/systemd/system");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function getSystemdServicePath(): string {
+  return path.join(os.homedir(), ".config", "systemd", "user", "clautel.service");
 }
 
 function startDirect(): void {
@@ -233,8 +254,8 @@ async function cmdSetup(): Promise<void> {
   console.log(`  Owner: ${ownerId}`);
   console.log("  License: Active");
 
-  // Auto-install launchd service on macOS for startup persistence
-  if (process.platform === "darwin") {
+  // Auto-install service on macOS (launchd) and Linux (systemd) for startup persistence
+  if (process.platform === "darwin" || (process.platform === "linux" && hasSystemd())) {
     console.log("\nInstalling auto-start service...");
     await cmdInstallService();
   } else {
@@ -307,6 +328,45 @@ async function cmdStart(): Promise<void> {
     return;
   }
 
+  // On Linux with systemd service installed, use systemctl to start
+  if (process.platform === "linux" && fs.existsSync(getSystemdServicePath())) {
+    const { code, stderr } = await systemctlExec(["start", "clautel"]);
+    if (code !== 0) {
+      console.error(`systemd: ${stderr.trim() || `exit code ${code}`}`);
+      console.log("Starting directly instead...");
+      startDirect();
+      return;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+
+    const newPid = readPid();
+    if (newPid && isRunning(newPid)) {
+      console.log(`Started via systemd (PID ${newPid})`);
+      console.log(`Logs: clautel logs`);
+    } else {
+      console.error("Daemon did not start via systemd.");
+      if (fs.existsSync(LOG_FILE)) {
+        const content = fs.readFileSync(LOG_FILE, "utf-8").trim();
+        if (content) {
+          const lines = content.split("\n").slice(-5);
+          console.error("Recent logs:\n  " + lines.join("\n  "));
+        }
+      }
+      console.log("\nFalling back to direct start...");
+      await systemctlExec(["stop", "clautel"]);
+      startDirect();
+    }
+    return;
+  }
+
+  // On Linux without service, install systemd service if available
+  if (process.platform === "linux" && hasSystemd()) {
+    console.log("Installing auto-start service...");
+    await cmdInstallService();
+    return;
+  }
+
   startDirect();
 }
 
@@ -321,6 +381,27 @@ async function cmdStop(): Promise<void> {
       console.log("Stopped (launchd service unloaded).");
     } else {
       // Fall back to SIGTERM if launchctl fails
+      if (pid && isRunning(pid)) {
+        process.kill(pid, "SIGTERM");
+        fs.rmSync(PID_FILE, { force: true });
+        console.log(`Stopped (PID ${pid})`);
+      } else {
+        fs.rmSync(PID_FILE, { force: true });
+        console.log("Not running.");
+      }
+    }
+    return;
+  }
+
+  // On Linux with systemd service installed, use systemctl to stop so
+  // Restart=always doesn't immediately restart the daemon
+  if (process.platform === "linux" && fs.existsSync(getSystemdServicePath())) {
+    const pid = readPid();
+    const { code } = await systemctlExec(["stop", "clautel"]);
+    if (code === 0) {
+      fs.rmSync(PID_FILE, { force: true });
+      console.log("Stopped (systemd service stopped).");
+    } else {
       if (pid && isRunning(pid)) {
         process.kill(pid, "SIGTERM");
         fs.rmSync(PID_FILE, { force: true });
@@ -399,8 +480,14 @@ function getPlistPath(): string {
 }
 
 async function cmdInstallService(): Promise<void> {
-  if (process.platform !== "darwin") {
-    console.error("install-service is only supported on macOS (launchd).");
+  if (process.platform !== "darwin" && process.platform !== "linux") {
+    console.error("install-service is supported on macOS (launchd) and Linux (systemd).");
+    process.exit(1);
+  }
+
+  if (process.platform === "linux" && !hasSystemd()) {
+    console.error("systemd not detected. install-service requires systemd.");
+    console.error("You can still run: clautel start (runs as a background process).");
     process.exit(1);
   }
 
@@ -409,6 +496,21 @@ async function cmdInstallService(): Promise<void> {
     process.exit(1);
   }
 
+  // Stop any manually-started daemon first to avoid conflict
+  const existingPid = readPid();
+  if (existingPid && isRunning(existingPid)) {
+    process.kill(existingPid, "SIGTERM");
+    fs.rmSync(PID_FILE, { force: true });
+  }
+
+  if (process.platform === "darwin") {
+    await installLaunchdService();
+  } else {
+    await installSystemdService();
+  }
+}
+
+async function installLaunchdService(): Promise<void> {
   const [cmd, args] = DAEMON_CMD;
   const programArgs = [cmd, ...args];
 
@@ -442,13 +544,6 @@ ${envEntries.join("\n")}
   </dict>
 </dict>
 </plist>`;
-
-  // Stop any manually-started daemon first to avoid conflict
-  const existingPid = readPid();
-  if (existingPid && isRunning(existingPid)) {
-    process.kill(existingPid, "SIGTERM");
-    fs.rmSync(PID_FILE, { force: true });
-  }
 
   const agentsDir = path.dirname(getPlistPath());
   fs.mkdirSync(agentsDir, { recursive: true });
@@ -497,22 +592,104 @@ ${envEntries.join("\n")}
   }
 }
 
-function cmdUninstallService(): void {
-  if (process.platform !== "darwin") {
-    console.error("uninstall-service is only supported on macOS (launchd).");
-    process.exit(1);
+async function installSystemdService(): Promise<void> {
+  const [cmd, args] = DAEMON_CMD;
+  const execStart = [cmd, ...args].join(" ");
+
+  const unit = `[Unit]
+Description=Clautel - Telegram bridge for Claude Code
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${execStart}
+Restart=always
+RestartSec=10
+StandardOutput=append:${LOG_FILE}
+StandardError=append:${LOG_FILE}
+Environment=HOME=${os.homedir()}
+Environment=PATH=${process.env.PATH || "/usr/local/bin:/usr/bin:/bin"}
+
+[Install]
+WantedBy=default.target
+`;
+
+  const serviceDir = path.dirname(getSystemdServicePath());
+  fs.mkdirSync(serviceDir, { recursive: true });
+
+  // Stop existing service if present (for clean reinstall)
+  if (fs.existsSync(getSystemdServicePath())) {
+    await systemctlExec(["stop", "clautel"]);
   }
 
-  if (!fs.existsSync(getPlistPath())) {
-    console.log("Service not installed.");
+  fs.writeFileSync(getSystemdServicePath(), unit, { mode: 0o644 });
+
+  await systemctlExec(["daemon-reload"]);
+  await systemctlExec(["enable", "clautel"]);
+  const { code, stderr } = await systemctlExec(["start", "clautel"]);
+
+  if (code !== 0) {
+    console.error(`systemd: ${stderr.trim() || `exit code ${code}`}`);
+    console.log("Starting daemon directly instead...");
+    startDirect();
     return;
   }
 
-  const unload = spawn("launchctl", ["unload", getPlistPath()], { stdio: "inherit" });
-  unload.on("close", () => {
+  // Give the daemon a moment to start and write its PID file
+  await new Promise((resolve) => setTimeout(resolve, 2000));
+
+  const newPid = readPid();
+  if (newPid && isRunning(newPid)) {
+    console.log("Service installed and started.");
+    console.log(`Unit: ${getSystemdServicePath()}`);
+    console.log("The daemon will auto-restart on crash and start at login.");
+  } else {
+    console.error("Service installed but daemon did not start.");
+    if (fs.existsSync(LOG_FILE)) {
+      const content = fs.readFileSync(LOG_FILE, "utf-8").trim();
+      if (content) {
+        const lines = content.split("\n").slice(-5);
+        console.error("Recent logs:\n  " + lines.join("\n  "));
+      }
+    } else {
+      console.error("No log file — daemon crashed before writing output.");
+      console.error("Run manually to see errors:");
+      console.error(`  ${DAEMON_CMD[0]} ${DAEMON_CMD[1].join(" ")}`);
+    }
+    console.log("\nFalling back to direct start...");
+    await systemctlExec(["stop", "clautel"]);
+    startDirect();
+  }
+}
+
+async function cmdUninstallService(): Promise<void> {
+  if (process.platform === "darwin") {
+    if (!fs.existsSync(getPlistPath())) {
+      console.log("Service not installed.");
+      return;
+    }
+    await launchctlExec(["unload", getPlistPath()]);
     fs.rmSync(getPlistPath(), { force: true });
     console.log("Service uninstalled.");
-  });
+    return;
+  }
+
+  if (process.platform === "linux") {
+    if (!fs.existsSync(getSystemdServicePath())) {
+      console.log("Service not installed.");
+      return;
+    }
+    await systemctlExec(["stop", "clautel"]);
+    await systemctlExec(["disable", "clautel"]);
+    fs.rmSync(getSystemdServicePath(), { force: true });
+    await systemctlExec(["daemon-reload"]);
+    console.log("Service uninstalled.");
+    return;
+  }
+
+  console.error("install-service is supported on macOS (launchd) and Linux (systemd).");
+  process.exit(1);
 }
 
 async function cmdActivate(): Promise<void> {
@@ -712,7 +889,7 @@ switch (command) {
     cmdInstallService().catch((err) => { console.error(err); process.exit(1); });
     break;
   case "uninstall-service":
-    cmdUninstallService();
+    cmdUninstallService().catch((err) => { console.error(err); process.exit(1); });
     break;
   default:
     cmdHelp();
