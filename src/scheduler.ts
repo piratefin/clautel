@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import cron from "node-cron";
+import { query } from "@anthropic-ai/claude-agent-sdk";
 import { DATA_DIR } from "./config.js";
 
 const SCHEDULES_FILE = path.join(DATA_DIR, "schedules.json");
@@ -121,49 +122,58 @@ export class ScheduleManager {
   }
 }
 
-// --- Claude-powered schedule parsing ---
+// --- Claude-powered schedule parsing (via Claude Code SDK) ---
 
 export async function parseScheduleWithClaude(input: string): Promise<{
   cronExpr: string;
   humanLabel: string;
   prompt: string;
 } | null> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) return null;
+  const prompt =
+    `Parse this schedule request and return ONLY valid JSON with no explanation or markdown:\n` +
+    `{"cronExpr": "...", "humanLabel": "...", "prompt": "..."}\n\n` +
+    `Rules:\n` +
+    `- cronExpr: standard 5-field cron expression\n` +
+    `- humanLabel: short human-readable label like "daily 9am", "every monday 9am", "every 3 days"\n` +
+    `- prompt: rewrite the task as a clear, precise, actionable instruction for an AI agent running autonomously with no human present\n\n` +
+    `Input: "${input.replace(/"/g, '\\"')}"`;
 
   try {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
+    // Strip CLAUDECODE env var so SDK subprocess doesn't refuse to start
+    const { CLAUDECODE: _, ...cleanEnv } = process.env;
+
+    let resultText = "";
+    const q = query({
+      prompt,
+      options: {
+        env: cleanEnv,
         model: "claude-haiku-4-5-20251001",
-        max_tokens: 300,
-        messages: [
-          {
-            role: "user",
-            content:
-              `Parse this schedule request and return ONLY valid JSON with no explanation or markdown:\n` +
-              `{"cronExpr": "...", "humanLabel": "...", "prompt": "..."}\n\n` +
-              `Rules:\n` +
-              `- cronExpr: standard 5-field cron expression\n` +
-              `- humanLabel: short human-readable label like "daily 9am", "every monday 9am", "every 3 days"\n` +
-              `- prompt: rewrite the task as a clear, precise, actionable instruction for an AI agent running autonomously with no human present\n\n` +
-              `Input: "${input.replace(/"/g, '\\"')}"`,
-          },
-        ],
-      }),
+        maxTurns: 1,
+        permissionMode: "bypassPermissions",
+      },
     });
 
-    if (!res.ok) return null;
-    const data = (await res.json()) as { content?: Array<{ text: string }> };
-    const text = data.content?.[0]?.text?.trim();
-    if (!text) return null;
-    return JSON.parse(text) as { cronExpr: string; humanLabel: string; prompt: string };
-  } catch {
+    for await (const message of q) {
+      if (message.type === "result" && message.subtype === "success") {
+        resultText = (message as Record<string, unknown>).result as string || "";
+      }
+    }
+
+    if (!resultText) {
+      console.error("[scheduler] No result from Claude Code");
+      return null;
+    }
+
+    // Extract JSON from response (may be wrapped in markdown code fences)
+    const jsonMatch = resultText.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      console.error("[scheduler] No JSON found in response:", resultText);
+      return null;
+    }
+
+    return JSON.parse(jsonMatch[0]) as { cronExpr: string; humanLabel: string; prompt: string };
+  } catch (err) {
+    console.error("[scheduler] Parse error:", err);
     return null;
   }
 }
