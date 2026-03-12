@@ -66,17 +66,21 @@ export class ScheduleManager {
     }
 
     const task = cron.schedule(schedule.cronExpr, async () => {
-      console.log(`[scheduler] Running: ${schedule.humanLabel} (${schedule.id})`);
+      try {
+        console.log(`[scheduler] Running: ${schedule.humanLabel} (${schedule.id})`);
 
-      // Update lastRunAt
-      const schedules = loadSchedules();
-      const idx = schedules.findIndex((s) => s.id === schedule.id);
-      if (idx !== -1) {
-        schedules[idx].lastRunAt = new Date().toISOString();
-        saveSchedules(schedules);
+        // Update lastRunAt
+        const schedules = loadSchedules();
+        const idx = schedules.findIndex((s) => s.id === schedule.id);
+        if (idx !== -1) {
+          schedules[idx].lastRunAt = new Date().toISOString();
+          saveSchedules(schedules);
+        }
+
+        await this.runCallback(schedule.botId, schedule.chatId, schedule.prompt, schedule.id);
+      } catch (err) {
+        console.error(`[scheduler] Task ${schedule.id} failed:`, err);
       }
-
-      await this.runCallback(schedule.botId, schedule.chatId, schedule.prompt, schedule.id);
     });
 
     this.tasks.set(schedule.id, task);

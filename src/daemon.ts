@@ -101,6 +101,7 @@ async function stopWorker(botId: number): Promise<void> {
   if (!worker) return;
 
   worker.bridge.abortAll();
+  scheduleManager.removeAllForBot(botId);
   await worker.tunnelManager.closeAll();
   await worker.bot.stop();
   activeWorkers.delete(botId);
@@ -152,7 +153,7 @@ async function main() {
       onAskUser: async () => ({}),
       onPlanApproval: async () => true,
       onSessionReset: () => {},
-    }, "bypassPermissions");
+    }, "bypassPermissions", 25);
   });
 
   // Detect Claude plan
