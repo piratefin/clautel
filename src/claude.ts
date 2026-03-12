@@ -399,7 +399,8 @@ export class ClaudeBridge {
     chatId: number,
     prompt: string,
     callbacks: SendCallbacks,
-    permissionMode: "default" | "bypassPermissions" = "default"
+    permissionMode: "default" | "bypassPermissions" = "default",
+    maxTurns?: number
   ): Promise<void> {
     // Secondary anti-bypass license check
     if (!checkLicenseForQuery().allowed) throw new Error("License required");
@@ -435,6 +436,7 @@ export class ClaudeBridge {
           model,
           includePartialMessages: true,
           permissionMode,
+          ...(maxTurns ? { maxTurns } : {}),
           ...(sessionId ? { resume: sessionId } : {}),
           abortController,
           canUseTool: async (toolName, input, { signal }) => {
