@@ -12,12 +12,14 @@ import { ScheduleManager, loadSchedules } from "./scheduler.js";
 import { claudeToTelegram, splitMessage } from "./formatter.js";
 
 import { checkLicenseForStartup, startPeriodicValidation, flushLicenseSync, getPaymentUrl, detectClaudePlan, getPlanLabel } from "./license.js";
+import { createForumBot } from "./forum.js";
 
 const PID_FILE = path.join(DATA_DIR, "daemon.pid");
 const HEALTH_CHECK_INTERVAL_MS = 5 * 60_000; // 5 minutes — grammY handles transient reconnects internally
 
 const activeWorkers = new Map<number, { config: BotConfig; bot: Bot; bridge: ClaudeBridge; tunnelManager: TunnelManager }>();
 let scheduleManager: ScheduleManager;
+let forumBot: Bot | null = null;
 const lastWorkerError = new Map<number, number>(); // botId → timestamp of last polling error
 const RESTART_COOLDOWN_MS = 120_000; // wait 2 minutes before restarting a failed worker
 let healthCheckTimer: NodeJS.Timeout | null = null;
@@ -201,6 +203,48 @@ async function main() {
   // Restore scheduled tasks
   scheduleManager.start(loadSchedules());
 
+  // Start forum bot if configured
+  if (config.FORUM_BOT_TOKEN && config.FORUM_GROUP_ID) {
+    try {
+      forumBot = createForumBot(config, scheduleManager);
+      await forumBot.init();
+      console.log(`Forum bot initialized for group ${config.FORUM_GROUP_ID}`);
+
+      forumBot.catch((err) => {
+        console.error("[forum] Bot error:", err.message);
+      });
+
+      // Fire-and-forget polling with 409 retry
+      const startForumPolling = async () => {
+        const MAX_RETRIES = 3;
+        const RETRY_DELAY_MS = 15_000;
+        for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+          try {
+            await forumBot!.start({
+              onStart: (info) => console.log(`Forum bot: @${info.username}`),
+            });
+            return;
+          } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            if (msg.includes("409") && attempt < MAX_RETRIES) {
+              const wait = RETRY_DELAY_MS * attempt;
+              console.log(`[forum] 409 Conflict (attempt ${attempt}/${MAX_RETRIES}), retrying in ${wait / 1000}s...`);
+              await new Promise((r) => setTimeout(r, wait));
+              continue;
+            }
+            throw err;
+          }
+        }
+      };
+
+      startForumPolling().catch((err: unknown) => {
+        console.error("[forum] Polling error:", err instanceof Error ? err.message : String(err));
+      });
+    } catch (err) {
+      console.error("[forum] Failed to start forum bot:", (err as Error).message);
+    }
+  }
+
   // Periodic health check: restart dead workers and recover saved bots
   healthCheckTimer = setInterval(async () => {
     // 1. Check running workers are still reachable
@@ -287,6 +331,9 @@ const shutdown = async () => {
     try { await worker.bot.stop(); } catch {}
   }
   activeWorkers.clear();
+  if (forumBot) {
+    try { await forumBot.stop(); } catch {}
+  }
   flushLicenseSync();
   fs.rmSync(PID_FILE, { force: true });
   process.exit(0);

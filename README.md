@@ -81,6 +81,59 @@ When you run `/preview` without a port, Claude will automatically start the dev 
 
 You'll be prompted for a free ngrok auth token on first use, or you can set it up during `clautel setup`.
 
+### Forum Group Mode
+
+Use a single bot in a Telegram supergroup with **Topics enabled**. Each topic maps to a project — great for teams collaborating on multiple repos with one bot token.
+
+**Setup:**
+
+1. Create a Telegram supergroup and enable Topics (Group Settings → Topics)
+2. Create a bot via [@BotFather](https://t.me/botfather) and add it to the group as admin with **Manage Topics** permission
+3. Get the group ID (add [@userinfobot](https://t.me/userinfobot) to the group, or use `-100`-prefixed ID from API)
+4. Add forum config to `~/.clautel/config.json`:
+
+```json
+{
+  "FORUM_BOT_TOKEN": "123456:ABC-DEF...",
+  "FORUM_GROUP_ID": -1001234567890,
+  "FORUM_ALLOWED_USERS": [111111, 222222]
+}
+```
+
+5. Restart: `clautel stop && clautel start`
+
+**Manager commands** (send in the General topic):
+
+| Command | Description |
+|---|---|
+| `/addtopic <name> </path/to/repo>` | Create a forum topic linked to a project |
+| `/removetopic <name>` | Remove a project topic |
+| `/topics` | List all linked topics |
+| `/allowlist` | View authorized users |
+| `/allowlist add <userId>` | Add a user to the allowlist |
+| `/allowlist remove <userId>` | Remove a user |
+
+**Project topic commands** (send in any project topic):
+
+| Command | Description |
+|---|---|
+| Send any message | Talk to Claude Code (shared session) |
+| `/new` | Start a fresh session |
+| `/model` | Switch Claude model |
+| `/cost` | Show token usage |
+| `/session` | Get session ID for CLI |
+| `/resume` | Resume a CLI session |
+| `/cancel` | Abort current operation |
+| `/preview <port>` | Open live preview tunnel |
+| `/close` | Close preview tunnel |
+| `/schedule` | Add a scheduled task |
+
+**How it works:**
+- All users in a topic share one Claude session — context carries over between teammates
+- One prompt processes at a time per topic (others are queued FIFO)
+- Use `/new` to reset the shared session
+- Forum mode runs alongside existing DM bots — both can be active simultaneously
+
 ### Session Continuity
 
 Switch seamlessly between CLI and Telegram:
@@ -135,14 +188,23 @@ clautel stop && clautel start
                 ┌───────────┼───────────┐
                 ▼           ▼           ▼
          ┌──────────┐┌──────────┐┌──────────┐
-         │ Worker 1 ││ Worker 2 ││ Worker N │
+         │ Worker 1 ││ Worker 2 ││ Worker N │  ← DM mode (1 bot per project)
          │ (repo A) ││ (repo B) ││ (repo N) │
          └──────────┘└──────────┘└──────────┘
+
+         ┌──────────────────────────────────┐
+         │  Forum Bot (optional)            │  ← Forum mode (1 bot, N topics)
+         │  ┌─────────┐ ┌─────────┐        │
+         │  │ Topic 1 │ │ Topic 2 │  ...    │
+         │  │ (repo X)│ │ (repo Y)│         │
+         │  └─────────┘ └─────────┘        │
+         └──────────────────────────────────┘
 ```
 
 - **Daemon** — single background process, manages bots and license
-- **Manager bot** — Telegram bot to add/remove project workers
-- **Worker bots** — one per project directory, full Claude Code access
+- **Manager bot** — Telegram bot to add/remove project workers (DM mode)
+- **Worker bots** — one per project directory, full Claude Code access (DM mode)
+- **Forum bot** — single bot in a supergroup with topics, each topic = one project (forum mode)
 - **License client** — validates against `license.clautel.com` (Ed25519 signed tokens)
 
 ## Data Flow

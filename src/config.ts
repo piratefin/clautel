@@ -11,6 +11,11 @@ interface SavedConfig {
   TELEGRAM_OWNER_ID?: number;
   NGROK_AUTH_TOKEN?: string;
   ANTHROPIC_API_KEY?: string;
+  FORUM_BOT_TOKEN?: string;
+  FORUM_GROUP_ID?: number;
+  FORUM_MANAGER_THREAD_ID?: number;
+  FORUM_ALLOWED_USERS?: number[];
+  FORUM_ADMIN_USERS?: number[];
 }
 
 function loadSavedConfig(): SavedConfig {
@@ -32,6 +37,13 @@ function required(name: string, savedValue?: string | number): string {
   return value;
 }
 
+function parseNumberList(envVar?: string, savedList?: number[]): number[] {
+  if (envVar) {
+    return envVar.split(",").map(Number).filter((n) => !isNaN(n) && n > 0);
+  }
+  return (savedList || []) as number[];
+}
+
 const saved = loadSavedConfig();
 
 // Make ANTHROPIC_API_KEY available from config file as fallback for launchd (no env secrets in plist)
@@ -44,4 +56,9 @@ export const config = {
   NGROK_AUTH_TOKEN: process.env.NGROK_AUTH_TOKEN ?? saved.NGROK_AUTH_TOKEN ?? undefined,
   ANTHROPIC_API_KEY: anthropicKey,
   DATA_DIR,
+  FORUM_BOT_TOKEN: process.env.FORUM_BOT_TOKEN ?? saved.FORUM_BOT_TOKEN ?? undefined,
+  FORUM_GROUP_ID: Number(process.env.FORUM_GROUP_ID ?? saved.FORUM_GROUP_ID ?? 0) || undefined,
+  FORUM_MANAGER_THREAD_ID: Number(process.env.FORUM_MANAGER_THREAD_ID ?? saved.FORUM_MANAGER_THREAD_ID ?? 1) || 1,
+  FORUM_ALLOWED_USERS: (saved.FORUM_ALLOWED_USERS || []) as number[],
+  FORUM_ADMIN_USERS: parseNumberList(process.env.FORUM_ADMIN_USERS, saved.FORUM_ADMIN_USERS),
 };
