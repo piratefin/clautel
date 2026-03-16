@@ -127,25 +127,16 @@ describe("license - checksum / anti-tamper", () => {
   });
 });
 
-describe("license - grace period", () => {
+describe("license - grace period (free build: always allowed)", () => {
   beforeEach(() => cleanup());
   afterEach(() => cleanup());
 
-  it("grace status returns allowed with warning", () => {
-    const state = defaultLicenseState();
-    state.status = "grace";
-    state.licenseKey = "test-key";
-    state.instanceId = "test-instance";
-    state.graceStartedAt = new Date().toISOString();
-    saveLicense(state);
-
+  it("query is always allowed", () => {
     const result = checkLicenseForQuery();
     assert.equal(result.allowed, true);
-    assert.ok(result.warning, "should have grace warning");
-    assert.ok(result.warning!.includes("lapsed"));
   });
 
-  it("grace period expires after 48h", () => {
+  it("query allowed regardless of grace state", () => {
     const state = defaultLicenseState();
     state.status = "grace";
     state.licenseKey = "test-key";
@@ -154,8 +145,7 @@ describe("license - grace period", () => {
     saveLicense(state);
 
     const result = checkLicenseForQuery();
-    assert.equal(result.allowed, false);
-    assert.ok(result.reason!.includes("expired"));
+    assert.equal(result.allowed, true);
   });
 });
 
@@ -178,34 +168,35 @@ describe("license - active status", () => {
   });
 });
 
-describe("license - expired status", () => {
+describe("license - expired status (free build: never blocks)", () => {
   beforeEach(() => cleanup());
   afterEach(() => cleanup());
 
-  it("expired status blocks all queries", () => {
+  it("expired status still allows queries in free build", () => {
     const state = defaultLicenseState();
     state.status = "expired";
     saveLicense(state);
 
     const result = checkLicenseForQuery();
-    assert.equal(result.allowed, false);
-    assert.ok(result.reason!.includes(getPaymentUrl()));
+    assert.equal(result.allowed, true);
   });
 });
 
-describe("license - startup checks", () => {
+describe("license - startup checks (free build: always allowed)", () => {
   beforeEach(() => cleanup());
   afterEach(() => cleanup());
 
-  it("blocks expired license on startup", async () => {
+  it("startup always allowed with no license file", async () => {
     const result = await checkLicenseForStartup();
-    assert.equal(result.allowed, false);
+    assert.equal(result.allowed, true);
   });
 
-  it("blocks when no license file exists", async () => {
+  it("startup always allowed with expired state", async () => {
+    const state = defaultLicenseState();
+    state.status = "expired";
+    saveLicense(state);
     const result = await checkLicenseForStartup();
-    assert.equal(result.allowed, false);
-    assert.ok(result.reason!.includes("expired"));
+    assert.equal(result.allowed, true);
   });
 });
 
@@ -229,46 +220,21 @@ describe("license - generateInstanceName", () => {
   });
 });
 
-describe("license - getLicenseInfo", () => {
+describe("license - getLicenseInfo (free build)", () => {
   beforeEach(() => cleanup());
   afterEach(() => cleanup());
 
-  it("shows expired info for new installation", () => {
+  it("shows Free and Max plan regardless of state", () => {
     const info = getLicenseInfo();
-    assert.ok(info.includes("Expired"));
-    assert.ok(info.includes(getPaymentUrl()));
+    assert.ok(info.includes("Free"), "info should indicate free build");
+    assert.ok(info.includes("Max"), "free build reports Max plan");
   });
 
-  it("shows active info for active license", () => {
-    const state = defaultLicenseState();
-    state.status = "active";
-    state.licenseKey = "abcdef123456";
-    state.lastValidatedAt = new Date().toISOString();
-    saveLicense(state);
-
-    const info = getLicenseInfo();
-    assert.ok(info.includes("Active"));
-    assert.ok(info.includes("abcdef12"));
-  });
-
-  it("shows grace info for grace period", () => {
-    const state = defaultLicenseState();
-    state.status = "grace";
-    state.graceStartedAt = new Date().toISOString();
-    saveLicense(state);
-
-    const info = getLicenseInfo();
-    assert.ok(info.includes("Grace"));
-    assert.ok(info.includes(getPaymentUrl()));
-  });
-
-  it("shows expired info", () => {
+  it("free build message is stable", () => {
     const state = defaultLicenseState();
     state.status = "expired";
     saveLicense(state);
-
     const info = getLicenseInfo();
-    assert.ok(info.includes("Expired"));
-    assert.ok(info.includes(getPaymentUrl()));
+    assert.ok(info.includes("Free") && info.includes("Max plan"));
   });
 });
