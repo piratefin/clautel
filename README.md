@@ -10,6 +10,19 @@ Run one lightweight process on your dev machine. It connects to Telegram via lon
 npm install -g clautel
 ```
 
+### Installing a local / patched build
+
+If you changed the source and want to install that build on this machine or another (Mac/Linux):
+Build, create a tarball, copy it to the target machine, then install globally:
+
+```bash
+npm run build
+npm pack
+# Copy the generated clautel-2.2.0.tgz to the other machine, then there:
+npm install -g ./clautel-2.2.0.tgz
+```
+Then `clautel` is on your PATH. You can skip copying `node_modules`; `npm install` on the target will fetch dependencies.
+
 ## Setup
 
 **1. Create a manager bot** — go to [@BotFather](https://t.me/botfather) → `/newbot` → copy the token.
